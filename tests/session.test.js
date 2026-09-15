@@ -364,7 +364,7 @@ function sessEnv(sh, extra) {
   }, extra || {});
 }
 function sessCode(overrides) {
-  return EXPIRY.concat([codeConst('SESSION_MAX_PER_ACCOUNT')]).concat(SESS_FNS.map(function (n) { return (overrides && overrides[n]) || codeFn(n); }));
+  return EXPIRY.concat([codeConst('SESSION_MAX_PER_ACCOUNT'), codeConst('SESSION_COLS')]).concat(SESS_FNS.map(function (n) { return (overrides && overrides[n]) || codeFn(n); }));
 }
 
 console.log("\n7. the idle check — never touches LastSeen, fails open, asks only from a visible idle tab");
@@ -565,10 +565,82 @@ console.log("\n9. the LastSeen write and the deletes hit the row the TOKEN is on
     /_withSessionLock_\(2000, function \(\) \{[\s\S]*\}, true\);/.test(codeFn('_touchSessionByToken_')), "");
   const calls = (SRC.match(/_compactSessions_\(/g) || []).length - 1;   // minus the definition
   check("_compactSessions_ is only called from inside the lock (login + the scheduled pass)", calls === 2 &&
-    /_withSessionLock_\(10000, function \(\) \{\s*sh\.appendRow\([\s\S]{0,120}\);\s*_compactSessions_\(sh, Date\.now\(\)\);/.test(codeFn('_issueSessionToken_')) &&
+    /_withSessionLock_\(10000, function \(\) \{\s*sh\.appendRow\([\s\S]{0,200}\);\s*_compactSessions_\(sh, Date\.now\(\)\);/.test(codeFn('_issueSessionToken_')) &&
     /_withSessionLock_\(30000, function \(\) \{ return _compactSessions_\(_getSessionSheet_\(\), Date\.now\(\)\); \}\)/.test(codeFn('_compactSessionsLocked_')), String(calls));
   check("the scheduled backup runs the session pass", /rep\.sessions = _compactSessionsLocked_\(\)/.test(codeFn('triggerScheduledBackup')), "");
   check("the cap is 3", /^const SESSION_MAX_PER_ACCOUNT = 3;/m.test(SRC), "");
+}
+
+console.log("\n10. each session's device (G/H) stays on ITS row");
+{
+  // ⚠️ WHY. Columns G Device / H DeviceId arrived 2026-09-15. _compactSessions_ moves rows up when it
+  // drops one, and it used to rewrite only 6 columns: G/H stayed where they were and a device label
+  // ended up on a DIFFERENT session. Reads are as wide as the header row, so an older sheet's
+  // missing headers would hide G/H from getMyAccount entirely.
+  const now = Date.now();
+  const d = function (days) { return new Date(now - days * DAY); };
+  const H8 = ['Token', 'Role', 'ID', 'Name', 'Created', 'LastSeen', 'Device', 'DeviceId'];
+  const ROWS = function () {
+    return [H8,
+      ['a', 'sales', 'S01', '甲野', d(3), d(1), 'Windows · Edge', 'aaaa1111-0000'],
+      ['x', 'sales', 'S02', '乙山', d(60), d(45), 'iPhone · Safari', 'xxxx2222-0000'],   // expired, in the middle
+      ['b', 'teacher', 'T01', '三郎', d(2), d(1), 'Android · Chrome', 'bbbb3333-0000']];
+  };
+  const DEV_FNS = [codeFn('_sessionDevice_'), codeFn('_ensureSessionDeviceHeaders_')];
+  const run = function (compactSrc) {
+    const sh = fakeSessions(ROWS());
+    sandbox(sessCode(compactSrc ? { _compactSessions_: compactSrc } : null), sessEnv(sh))._compactSessions_(sh, now);
+    return sh.data;
+  };
+  const rowsAfter = run();
+  check("the expired middle row is dropped", rowsAfter[1][0] === 'a' && rowsAfter[2][0] === 'b', JSON.stringify(rowsAfter.map(function (r) { return r[0]; })));
+  check("⚠️ the moved-up session keeps ITS device and id",
+    rowsAfter[2][6] === 'Android · Chrome' && rowsAfter[2][7] === 'bbbb3333-0000', JSON.stringify(rowsAfter[2]));
+  check("...and the freed tail row is cleared across all 8 columns",
+    !rowsAfter[3] || (rowsAfter[3][0] === '' && rowsAfter[3][6] === '' && rowsAfter[3][7] === ''), JSON.stringify(rowsAfter[3]));
+
+  // Mutation: the old 6-column rewrite.
+  const six = codeFn('_compactSessions_').split('SESSION_COLS').join('6')
+    .replace(/\n\s*\.concat\(_cellSafeRow_\(\[String\(x\.r\[6\][\s\S]*?\]\)\);/, ';');
+  check("  (the mutation really is the old shape)", six !== codeFn('_compactSessions_') && six.indexOf('x.r[6]') === -1, "");
+  const old = run(six);
+  check("  mutation: rewriting 6 columns puts the dropped row's device on the moved-up session",
+    old[2][0] === 'b' && old[2][6] === 'iPhone · Safari', JSON.stringify(old[2]));
+
+  // Headers on an older six-column sheet.
+  const legacy = fakeSessions([['Token', 'Role', 'ID', 'Name', 'Created', 'LastSeen']]);
+  const hc = sandbox(DEV_FNS, {});
+  hc._ensureSessionDeviceHeaders_(legacy);
+  const w1 = legacy.writes;
+  hc._ensureSessionDeviceHeaders_(legacy);
+  check("an older sheet gains the Device / DeviceId headers", legacy.data[0][6] === 'Device' && legacy.data[0][7] === 'DeviceId', JSON.stringify(legacy.data[0]));
+  check("...and a second call writes nothing", w1 === 1 && legacy.writes === 1, w1 + " then " + legacy.writes);
+
+  // What the browser sends is cleaned. The bell character is built, never typed, so no raw control
+  // byte lands in this file (cellsafe.test §7).
+  const BEL = String.fromCharCode(7);
+  const dv = sandbox(DEV_FNS, {});
+  const good = dv._sessionDevice_({ label: '  Windows ' + BEL + '·\n Edge  ', id: '3f9a2c1b-7d4e-4a1b-9c2d-0e8f6a5b4c3d' });
+  check("a label loses control characters and extra spaces", good.label === 'Windows · Edge', JSON.stringify(good.label));
+  check("a UUID id is kept", good.id === '3f9a2c1b-7d4e-4a1b-9c2d-0e8f6a5b4c3d', good.id);
+  check("a long label is cut to 60", dv._sessionDevice_({ label: 'x'.repeat(500) }).label.length === 60, "");
+  check("an id that is not 8–64 letters, digits or dashes is dropped",
+    ['abc', 'x'.repeat(65), '<script>alert(1)</script>', '=1+1', '../../etc'].every(function (bad) { return dv._sessionDevice_({ id: bad }).id === ''; }), "");
+  check("nothing sent (an older page) gives blanks", JSON.stringify(dv._sessionDevice_(undefined)) === '{"label":"","id":""}', "");
+  const loose = sandbox([mutate(codeFn('_sessionDevice_'), '/^[A-Za-z0-9-]{8,64}$/.test(id) ? id : ""', 'id'), codeFn('_ensureSessionDeviceHeaders_')], {});
+  check("  mutation: without the id pattern a script tag is stored", loose._sessionDevice_({ id: '<script>alert(1)</script>' }).id !== '', "");
+
+  // The login writes it: G/H in place, formula-safe, headers ensured.
+  const sh = fakeSessions([['Token', 'Role', 'ID', 'Name', 'Created', 'LastSeen']]);
+  let uuid = 0;
+  const env = sessEnv(sh);
+  env.Utilities = Object.assign({}, env.Utilities, { getUuid: function () { uuid++; return 'uuid-' + uuid + '-0000-0000'; } });
+  const lc = sandbox(sessCode().concat(DEV_FNS).concat([codeFn('_issueSessionToken_')]), env);
+  const tok = lc._issueSessionToken_({ role: 'sales', id: 'S01', name: '甲野' }, { label: '=HYPERLINK("x")', id: 'dev-0001-abcd' });
+  const row = sh.data.filter(function (r) { return r[0] === tok; })[0] || [];
+  check("the login's row carries the device in G and the id in H", String(row[7]) === 'dev-0001-abcd', JSON.stringify(row));
+  check("⚠️ a label starting with = is written as text (_cellSafeRow_)", row[6] === "'=HYPERLINK(\"x\")", JSON.stringify(row[6]));
+  check("...and the headers were ensured under the same lock", sh.data[0][6] === 'Device' && sh.data[0][7] === 'DeviceId', JSON.stringify(sh.data[0]));
 }
 
 console.log("\n" + pass + " passed, " + fail + " FAILED");

@@ -527,6 +527,10 @@ an audit trail stops being read. There is **no UI for either yet** — 増減推
 
 ### 6.1 Login and sessions
 
+**Sessions columns:** Token, Role, ID, Name, Created, LastSeen, Device, DeviceId. Device and
+DeviceId are display-only values the browser sends with `loginUser` (an OS · browser label and a
+random per-browser id), shown in アカウント設定 → ログイン中の端末 and never used to decide access.
+
 `loginUser(email, password)` matches on **email**, trimmed and case-insensitive,
 across both master sheets, then issues a token stored in `Sessions`.
 `resumeSession(token)` re-resolves the user on reload, so permission changes take

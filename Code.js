@@ -1437,7 +1437,7 @@ function _getSessionSheet_() {
   let sh = ss.getSheetByName(SESSION_SHEET);
   if (!sh) {
     sh = ss.insertSheet(SESSION_SHEET);
-    sh.appendRow(["Token", "Role", "ID", "Name", "Created", "LastSeen"]);
+    sh.appendRow(["Token", "Role", "ID", "Name", "Created", "LastSeen", "Device", "DeviceId"]);
     sh.setFrozenRows(1);
     try { sh.hideSheet(); } catch (e) {}
   }
@@ -1467,6 +1467,11 @@ function _sessionSeenOf_(row) {
 // oldest. Every login used to add a working credential that nothing ever took away.
 const SESSION_MAX_PER_ACCOUNT = 3;
 
+// ⚠️ THE SHEET IS 8 WIDE: Token, Role, ID, Name, Created, LastSeen, Device, DeviceId. Whole-row
+// reads and rewrites use this. _compactSessions_ moves rows up when it drops one; rewriting only 6
+// columns left G/H behind, so a device label would sit on a DIFFERENT session.
+const SESSION_COLS = 8;
+
 // ⚠️ ONE PASS, and it REWRITES rather than deleting row by row. It normalises every Date cell
 // to a stamp, drops expired sessions, and keeps each account's newest SESSION_MAX_PER_ACCOUNT.
 // The first run after the date fix meets months of backlog at once, and one deleteRow is
@@ -1477,7 +1482,7 @@ const SESSION_MAX_PER_ACCOUNT = 3;
 function _compactSessions_(sh, now) {
   const last = sh.getLastRow();
   if (last < 2) return { kept: 0, dropped: 0, normalised: 0 };
-  const rows = sh.getRange(2, 1, last - 1, 6).getValues();
+  const rows = sh.getRange(2, 1, last - 1, SESSION_COLS).getValues();
   let normalised = 0, dropped = 0;
   const live = [];
   rows.forEach(function (r, i) {
@@ -1502,16 +1507,18 @@ function _compactSessions_(sh, now) {
             .forEach(function (x, n) { if (n < SESSION_MAX_PER_ACCOUNT) keep[x.i] = true; else dropped++; });
   });
   if (!normalised && !dropped) return { kept: live.length, dropped: 0, normalised: 0 };
-  // Original order kept (it is creation order). A–D through _cellSafeRow_ — a name starting
-  // with = would otherwise become a formula on the rewrite; E/F re-marked as text.
+  // Original order kept (it is creation order). A–D and G/H through _cellSafeRow_ — a name or a
+  // device label starting with = would otherwise become a formula on the rewrite; E/F re-marked
+  // as text.
   const out = live.filter(function (x) { return keep[x.i]; }).map(function (x) {
     return _cellSafeRow_([x.r[0], x.r[1], x.r[2], x.r[3]])
-      .concat([x.created ? "'" + x.created : "", x.seen ? "'" + x.seen : ""]);
+      .concat([x.created ? "'" + x.created : "", x.seen ? "'" + x.seen : ""])
+      .concat(_cellSafeRow_([String(x.r[6] == null ? "" : x.r[6]), String(x.r[7] == null ? "" : x.r[7])]));
   });
-  if (out.length) sh.getRange(2, 1, out.length, 6).setValues(out);
+  if (out.length) sh.getRange(2, 1, out.length, SESSION_COLS).setValues(out);
   // Clear, not deleteRows: a sheet cannot lose ALL its non-frozen rows, and appendRow reuses
   // the freed tail anyway.
-  if (rows.length > out.length) sh.getRange(2 + out.length, 1, rows.length - out.length, 6).clearContent();
+  if (rows.length > out.length) sh.getRange(2 + out.length, 1, rows.length - out.length, SESSION_COLS).clearContent();
   _forgetTab_(SESSION_SHEET);
   return { kept: out.length, dropped: dropped, normalised: normalised };
 }
@@ -1562,16 +1569,40 @@ function _compactSessionsLocked_() {
   return _withSessionLock_(30000, function () { return _compactSessions_(_getSessionSheet_(), Date.now()); });
 }
 
-function _issueSessionToken_(user) {
+// The device a login came from, as the BROWSER describes it: a label ("Windows · Edge") and a
+// random id that browser keeps. ⚠️ DISPLAY ONLY. Anyone can send anything here, so nothing may
+// authorise, match or sign out by it; sessions are still found by token and accounts by session.
+// Cleaned so a hostile value cannot bloat the sheet or break the list.
+function _sessionDevice_(device) {
+  const d = device && typeof device === "object" ? device : {};
+  const label = String(d.label == null ? "" : d.label)
+    .replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  const id = String(d.id == null ? "" : d.id).trim();
+  return { label: label, id: /^[A-Za-z0-9-]{8,64}$/.test(id) ? id : "" };
+}
+
+// ⚠️ Reads are only as wide as the HEADER ROW (_bulkReadSheets_ rectangularises to it), and a
+// Sessions sheet created before 2026-09-15 has six headers. Without these two cells every device
+// written to G/H is invisible to getMyAccount. One small read; a write only the first time.
+function _ensureSessionDeviceHeaders_(sh) {
+  const h = sh.getRange(1, 7, 1, 2).getValues()[0] || [];
+  if (String(h[0] || "") !== "Device" || String(h[1] || "") !== "DeviceId") {
+    sh.getRange(1, 7, 1, 2).setValues([["Device", "DeviceId"]]);
+  }
+}
+
+function _issueSessionToken_(user, device) {
   try {
     const sh = _getSessionSheet_();
     const token = Utilities.getUuid() + Utilities.getUuid().replace(/-/g, '');
     const stamp = _sessionStamp_(new Date());
+    const dev = _sessionDevice_(device);
     // Appended FIRST, so the cap counts this login among the account's newest — it is never the
     // one retired. Under the lock; see _withSessionLock_.
     _withSessionLock_(10000, function () {
-      sh.appendRow(_cellSafeRow_([token, user.role, user.id, user.name]).concat([stamp, stamp]));
+      sh.appendRow(_cellSafeRow_([token, user.role, user.id, user.name]).concat([stamp, stamp]).concat(_cellSafeRow_([dev.label, dev.id])));
       _compactSessions_(sh, Date.now());
+      _ensureSessionDeviceHeaders_(sh);
     });
     // The per-execution read memo would otherwise hand back a snapshot taken
     // before this row existed.
@@ -1622,7 +1653,7 @@ function _rejectLogin_(reason) {
 
 // Email + password. The master account signs in as MASTER with the SYSTEM_PIN
 // script property — it lives in no sheet, so it stays the break-glass.
-function loginUser(email, password) {
+function loginUser(email, password, device) {
   const id = String(email == null ? "" : email).trim();
   const pw = String(password == null ? "" : password);
 
@@ -1654,7 +1685,7 @@ function loginUser(email, password) {
   // fresh login would otherwise build its payload with no permissions at all.
   _authUser = user;
 
-  const token = _issueSessionToken_(user);
+  const token = _issueSessionToken_(user, device);
   _logActivity_({ name: user.name, id: user.id, role: user.role }, "ログイン", "", "");
   // `boot` rides along so a fresh login gets the same single round trip as the
   // resume path. Skipped when a password change is being forced — the app is not
@@ -1965,7 +1996,10 @@ function getMyAccount() {
       started: String(data[i][4] || ""),
       lastSeen: seen,
       seenAt: age >= 0 ? now - age : 0,
-      current: _authToken !== "" && tok === _authToken
+      current: _authToken !== "" && tok === _authToken,
+      // Display only (see _sessionDevice_). A row from before these columns has neither.
+      device: String(data[i][6] == null ? "" : data[i][6]),
+      deviceId: String(data[i][7] == null ? "" : data[i][7]).slice(0, 8)
     });
   }
   sessions.sort(function (a, b) { return (b.current - a.current) || (b.seenAt - a.seenAt); });

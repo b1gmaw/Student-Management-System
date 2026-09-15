@@ -9,6 +9,9 @@ codex-session-*.md
 .env
 .env.*
 
+# Python bytecode from running tools/*.py
+__pycache__/
+
 # Kept out of this public copy on purpose: deploy settings naming the Apps Script
 # projects, and the maintainer's private working notes.
 .clasp.json

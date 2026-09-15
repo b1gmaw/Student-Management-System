@@ -112,8 +112,8 @@ console.log("\n1. メール通知 changes the CALLER's own row, whatever id the 
 // Sessions: the caller is staff ID 5. A TEACHER also has ID 5 — a different account.
 const SESS_ROWS = function () {
   return [
-    ['Token', 'Role', 'ID', 'Name', 'Created', 'LastSeen'],
-    ['tokA', 'sales', '5', '五郎', ago(2 * DAY), ago(HOUR)],        // this device
+    ['Token', 'Role', 'ID', 'Name', 'Created', 'LastSeen', 'Device', 'DeviceId'],
+    ['tokA', 'sales', '5', '五郎', ago(2 * DAY), ago(HOUR), 'Windows · Edge', '3f9a2c1b-7d4e-4a1b'],   // this device
     ['tokB', 'jimu', '5', '五郎', ago(9 * DAY), ago(2 * DAY)],       // same account, stale role
     ['tokC', 'teacher', '5', '先生', ago(DAY), ago(HOUR)],           // other account, same ID
     ['tokD', 'sales', '5', '五郎', ago(200 * DAY), ago(120 * DAY)],  // expired
@@ -156,6 +156,13 @@ console.log("\n2. getMyAccount lists only the caller's live sessions, and never 
   let leak;
   try { leak = JSON.stringify(run(mutate(G, 'sid: _sessionHandle_(tok),', 'sid: tok,'), 'tokA')); } catch (e) { leak = 'threw: ' + e.message; }
   check("mutation: returning the token as the handle is caught", /tokA/.test(leak), leak);
+  check("this device's label and the first 8 characters of its id come back",
+    out.sessions[0].device === 'Windows · Edge' && out.sessions[0].deviceId === '3f9a2c1b', json);
+  check("a session from before the device columns returns blanks, not undefined",
+    out.sessions[1].device === '' && out.sessions[1].deviceId === '', json);
+  let nodev;
+  try { nodev = run(mutate(G, '      deviceId: String(data[i][7] == null ? "" : data[i][7]).slice(0, 8)\n', ''), 'tokA'); } catch (e) { nodev = { sessions: [{}] }; }
+  check("  mutation: without the id line the list has no device ID", nodev.sessions[0].deviceId === undefined, JSON.stringify(nodev.sessions[0]));
   let wide;
   try { wide = run(mutate(G, 'if (tok === "" || _sessionAccountKey_(data[i][1], data[i][2]) !== want) continue;', 'if (tok === "") continue;'), 'tokA'); }
   catch (e) { wide = { sessions: [] }; }
@@ -315,6 +322,64 @@ console.log("\n7. the markup");
     (bare.match(/^\s*[^\s{}][^{]*\{/gm) || []).every(function (r) { return /#view-account/.test(r) || /^\s*(to|from|\d)/.test(r); }), "");
   check("theme buttons cover all three choices",
     ['light', 'dark', 'system'].every(function (p) { return HTML.indexOf("setThemePref('" + p + "')") !== -1; }), "");
+}
+
+console.log("\n8. ログイン中の端末: which device, as the browser describes it");
+{
+  const LABEL = htmlFn('_deviceLabel');
+  const lab = function (ua, extra) { return sandbox([LABEL], {})._deviceLabel(Object.assign({ userAgent: ua }, extra || {})); };
+  const UAS = [
+    ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0', 'Windows · Edge'],
+    ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36', 'Windows · Chrome'],
+    ['Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0', 'Windows · Firefox'],
+    ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15', 'macOS · Safari'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1', 'iPhone · Safari'],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/128.0.6613.98 Mobile/15E148 Safari/604.1', 'iPhone · Chrome'],
+    ['Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36', 'Android · Chrome'],
+    ['Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36', 'ChromeOS · Chrome'],
+  ];
+  UAS.forEach(function (p) { check(p[1], lab(p[0]) === p[1], lab(p[0])); });
+  check("an iPad asking for the desktop site (Macintosh + touch) is an iPad",
+    lab(UAS[3][0], { maxTouchPoints: 5 }) === 'iPad · Safari', lab(UAS[3][0], { maxTouchPoints: 5 }));
+  check("nothing recognisable is 不明な端末", lab('') === '不明な端末', lab(''));
+  const edgeless = sandbox([mutate(LABEL, 'browser = "Edge";', 'browser = "Chrome";')], {})._deviceLabel({ userAgent: UAS[0][0] });
+  check("  mutation: without the Edge branch, Edge reads as Chrome", edgeless === 'Windows · Chrome', edgeless);
+
+  // The id: ours, random, kept in this browser.
+  const ID = htmlFn('_deviceId');
+  const store = function (initial, throws) {
+    const m = Object.assign({}, initial || {});
+    return { m: m, getItem: function (k) { if (throws) throw new Error('blocked'); return k in m ? m[k] : null; },
+             setItem: function (k, v) { if (throws) throw new Error('blocked'); m[k] = v; } };
+  };
+  const cryptoStub = { randomUUID: function () { return '11111111-2222-4333-8444-555555555555'; } };
+  const idc = function (ls) { const env = { localStorage: ls, crypto: cryptoStub }; env.window = env; return sandbox([ID], env)._deviceId(); };
+  const fresh = store();
+  check("a first login creates an id and keeps it", idc(fresh) === '11111111-2222-4333-8444-555555555555' && fresh.m.sms_deviceId === '11111111-2222-4333-8444-555555555555', JSON.stringify(fresh.m));
+  const kept = store({ sms_deviceId: 'abcdef12-3456' });
+  check("an existing id is reused, not replaced", idc(kept) === 'abcdef12-3456', "");
+  const junk = store({ sms_deviceId: '<bad>' });
+  check("a malformed stored value is replaced", idc(junk) === '11111111-2222-4333-8444-555555555555', "");
+  check("blocked storage gives an empty id instead of breaking the login", idc(store({}, true)) === '', "");
+
+  // Sent with the login, shown escaped.
+  check("the login sends the label and the id", /\.loginUser\(email, activePin, \{ label: _deviceLabel\(\), id: _deviceId\(\) \}\)/.test(JS), "");
+  const host = { innerHTML: '' };
+  const renv = {
+    document: { getElementById: function () { return host; } }, window: {},
+    escHtmlJs: function (v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); },
+    escAttrJsStr: function (v) { return String(v); },
+  };
+  const R = sandbox([htmlFn('_acctStamp'), htmlFn('_acctRenderSessions')], renv);
+  R._acctRenderSessions([
+    { sid: 's1', current: true, device: 'Windows · Edge', deviceId: '3f9a2c1b', lastSeen: '2026-09-15 10:00:00', started: '2026-09-14 09:00:00' },
+    { sid: 's2', current: false, device: '<img src=x onerror=alert(1)>', deviceId: '', lastSeen: '', started: '' },
+    { sid: 's3', current: false, device: '', deviceId: '' },
+  ]);
+  check("the label and 端末ID are shown", /Windows · Edge/.test(host.innerHTML) && /端末ID 3f9a2c1b/.test(host.innerHTML), host.innerHTML.slice(0, 200));
+  check("⚠️ a hostile label is escaped, never markup", host.innerHTML.indexOf('<img') === -1 && /&lt;img/.test(host.innerHTML), "");
+  check("a session from before the change says so", /端末情報なし（更新前のログイン）/.test(host.innerHTML), "");
+  check("使用中 stays on this device only", (host.innerHTML.match(/使用中/g) || []).length === 1, "");
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

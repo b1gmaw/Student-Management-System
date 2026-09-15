@@ -937,6 +937,7 @@
       #view-account .acct-sess-main { flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: bold; }
       #view-account .acct-sess-when { font-size: 12px; font-weight: normal; color: var(--text-muted); font-variant-numeric: tabular-nums; }
       #view-account .acct-sess .u-badge { margin: 0 0 0 6px; }
+      #view-account .acct-sess-when span { white-space: nowrap; }
       #view-account .acct-sess-all { margin-top: 10px; }
       /* ⚠️ Never wraps: at 390px ログアウト broke into 「ログア/ウト」 beside a long timestamp. */
       #view-account .acct-sess .schedule-btn { flex: 0 0 auto; white-space: nowrap; }
@@ -5818,6 +5819,48 @@
         tryResumeSession();
       }
 
+      // The device this browser reports, sent with the login and shown in ログイン中の端末.
+      // ⚠️ DISPLAY ONLY: the server cleans it and decides nothing by it (_sessionDevice_). A browser
+      // cannot read a computer's name or a hardware id, so the id is our own random one, kept in
+      // this browser; clearing its site data makes a new one.
+      function _deviceId() {
+        try {
+          let id = localStorage.getItem('sms_deviceId') || "";
+          if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) {
+            if (window.crypto && typeof crypto.randomUUID === 'function') id = crypto.randomUUID();
+            else if (window.crypto && crypto.getRandomValues) {
+              id = Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(16)),
+                function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+            } else { return ""; }
+            localStorage.setItem('sms_deviceId', id);
+          }
+          return id;
+        } catch (e) { return ""; }
+      }
+
+      // "Windows · Edge", "iPhone · Safari". The user-agent string still names the OS and the browser.
+      function _deviceLabel(nav) {
+        nav = nav || (typeof navigator !== 'undefined' ? navigator : {});
+        const ua = String(nav.userAgent || "");
+        const touch = Number(nav.maxTouchPoints || 0) > 1;
+        let os = "";
+        if (/iPhone/.test(ua)) os = "iPhone";
+        else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) os = "iPad";   // iPadOS asks for the desktop site
+        else if (/Android/.test(ua)) os = "Android";
+        else if (/CrOS/.test(ua)) os = "ChromeOS";
+        else if (/Windows/.test(ua)) os = "Windows";
+        else if (/Macintosh|Mac OS X/.test(ua)) os = "macOS";
+        else if (/Linux/.test(ua)) os = "Linux";
+        else if (nav.userAgentData && nav.userAgentData.platform) os = String(nav.userAgentData.platform);
+        let browser = "";
+        // ⚠️ Order matters: an Edge string also says Chrome and Safari, and Chrome says Safari.
+        if (/Edg(?:e|A|iOS)?\//.test(ua)) browser = "Edge";
+        else if (/Firefox\/|FxiOS\//.test(ua)) browser = "Firefox";
+        else if (/Chrome\/|CriOS\//.test(ua)) browser = "Chrome";
+        else if (/Safari\//.test(ua)) browser = "Safari";
+        return os && browser ? os + " · " + browser : (os || browser || "不明な端末");
+      }
+
       function submitPin() {
         let email = document.getElementById("loginEmail").value;
         let input = document.getElementById("pinInput").value;
@@ -5850,7 +5893,7 @@
              document.getElementById("pinError").innerText = err.message || err || "メールアドレスまたはパスワードが正しくありません";
              document.getElementById("pinError").style.display = "block";
              btn.innerText = "ログイン"; btn.style.backgroundColor = "var(--table-header-text)";
-          }).loginUser(email, activePin);
+          }).loginUser(email, activePin, { label: _deviceLabel(), id: _deviceId() });
       }
 
       // The forced first-time / post-reset password set. Uses the session token
@@ -6040,11 +6083,17 @@
         if (!list.length) { host.innerHTML = "<p class='acct-hint'>ログイン中の端末はありません。</p>"; return; }
         let h = "";
         list.forEach(function (s) {
-          const whenText = (s.lastSeen ? "最終操作 " + _acctStamp(s.lastSeen) : "") +
-                           (s.started ? "　ログイン " + _acctStamp(s.started) : "");
+          // Each fact is one unbreakable piece, so a narrow row wraps BETWEEN them, never inside a date.
+          const when = [];
+          if (s.deviceId) when.push("端末ID " + s.deviceId);
+          if (s.lastSeen) when.push("最終操作 " + _acctStamp(s.lastSeen));
+          if (s.started) when.push("ログイン " + _acctStamp(s.started));
+          const whenHtml = when.map(function (t) { return "<span>" + escHtmlJs(t) + "</span>"; }).join("　");
           h += "<div class='acct-sess'><div class='acct-sess-main'>" +
-               (s.current ? "この端末<span class='u-badge u-admin'>使用中</span>" : "別の端末") +
-               "<div class='acct-sess-when'>" + escHtmlJs(whenText) + "</div></div>" +
+               // The label is the browser's own description, so it is escaped like any sheet value.
+               escHtmlJs(s.device || "端末情報なし（更新前のログイン）") +
+               (s.current ? "<span class='u-badge u-admin'>使用中</span>" : "") +
+               "<div class='acct-sess-when'>" + whenHtml + "</div></div>" +
                (s.current ? "" :
                  "<button type='button' class='schedule-btn btn-xs acct-danger' onclick=\"signOutDevice('" + escAttrJsStr(s.sid) + "', this)\">ログアウト</button>") +
                "</div>";

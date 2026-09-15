@@ -660,9 +660,10 @@ const FIXTURES = {
   getMyAccount: {
     pwUpdatedAt: '2026-09-02 09:14:31',
     sessions: [
-      { sid: 'a1b2c3d4e5f60718', started: '2026-09-12 08:30:02', lastSeen: '2026-09-14 13:05:44', seenAt: 3, current: true },
-      { sid: '0f1e2d3c4b5a6978', started: '2026-09-08 17:20:15', lastSeen: '2026-09-13 18:41:09', seenAt: 2, current: false },
-      { sid: '99aa88bb77cc66dd', started: '2026-08-29 12:02:50', lastSeen: '2026-09-01 10:11:23', seenAt: 1, current: false },
+      { sid: 'a1b2c3d4e5f60718', started: '2026-09-12 08:30:02', lastSeen: '2026-09-14 13:05:44', seenAt: 3, current: true, device: 'Windows · Edge', deviceId: '3f9a2c1b' },
+      { sid: '0f1e2d3c4b5a6978', started: '2026-09-08 17:20:15', lastSeen: '2026-09-13 18:41:09', seenAt: 2, current: false, device: 'iPhone · Safari', deviceId: 'b71e04d9' },
+      // A session from before the device columns: no label, no id.
+      { sid: '99aa88bb77cc66dd', started: '2026-08-29 12:02:50', lastSeen: '2026-09-01 10:11:23', seenAt: 1, current: false, device: '', deviceId: '' },
     ],
   },
   signOutMySession: { signedOut: 1 },

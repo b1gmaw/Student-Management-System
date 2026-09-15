@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap');
+      
+      @page { size: A4; margin: 8mm 12mm; }
+      body { font-family: 'Noto Sans JP', sans-serif; font-size: 8.5pt; color: #000; line-height: 1.25; margin: 0; padding: 0; }
+      
+      .page-break { page-break-after: always; }
+      .bold { font-weight: 700; }
+      .text-center { text-align: center; }
+      .text-right { text-align: right; }
+      
+      /* --- PAGE 1 STYLES --- */
+      .p1-title { font-size: 9.5pt; margin-bottom: 8px; font-weight: bold; }
+      
+      .table-p1 { width: 100%; border-collapse: collapse; margin-bottom: 20px; table-layout: fixed; }
+      .table-p1 th, .table-p1 td { border: 1px solid #000; padding: 4px 6px; vertical-align: middle; }
+      .table-p1 th { text-align: center; font-weight: bold; }
+      
+      /* Updated column widths */
+      .col1 { width: 6%; text-align: center; }
+      .col2 { width: 38%; }
+      .col3 { width: 10%; text-align: center; font-size: 8.5pt; }
+      .col4-sub { width: 8%; text-align: center; } 
+      .col5 { width: 30%; font-size: 7.5pt; vertical-align: top; }
+      
+      .col3-style { font-size: 8.5pt; text-align: center; }
+      .col5-style { font-size: 7.5pt; vertical-align: top; }
+      
+      /* CSS for drawing a massive 3.0em circle over the text */
+      .circle-txt {
+        display: inline-block;
+        border: 1px solid #000;
+        border-radius: 50%;
+        width: 3.0em;
+        height: 3.0em;
+        line-height: 2.9em;
+        text-align: center;
+      }
+      
+      /* Footer text alignment */
+      .p1-footer-text { width: 100%; border-collapse: collapse; margin-top: 5px; table-layout: fixed; }
+      .p1-footer-text td { border: none; padding: 4px 6px; vertical-align: bottom; }
+      
+      /* --- PAGE 2 STYLES --- */
+      .p2-header { font-size: 10pt; font-weight: bold; margin-bottom: 6px; }
+      .section-num { font-weight: bold; font-size: 9pt; margin-top: 8px; margin-bottom: 4px; }
+      
+      .box-title { font-weight: bold; margin-top: 8px; margin-bottom: 4px; }
+      .sub-text { font-size: 7.5pt; font-weight: normal; }
+      
+      /* Bordered tables for Interview and Others */
+      .table-p2 { width: 100%; border-collapse: collapse; margin-bottom: 8px; table-layout: fixed; }
+      .table-p2 td { border: 1px solid #000; padding: 4px 6px; vertical-align: top; }
+      
+      /* Structured grid layout for clean vertical alignment */
+      .borderless-data { width: 100%; border-collapse: collapse; margin-bottom: 10px; margin-left: 10px; table-layout: fixed; }
+      .borderless-data td { border: none; padding: 3px 4px; vertical-align: middle; }
+      
+      .checkbox { font-family: 'MS Gothic', monospace; font-size: 11pt; }
+      
+      /* A block on 【別紙（続き）】 must never be split across sheets — the title on one
+         page and its rows on the next is unreadable on an official form. */
+      .xblk { page-break-inside: avoid; }
+      .p2-footer-text { width: 100%; margin-top: 15px; border-collapse: collapse; table-layout: fixed; }
+      .p2-footer-text td { border: none; padding: 6px 8px; vertical-align: bottom; }
+    </style>
+  </head>
+  <body>
+    
+    <div class="<?= (amValue === 'はい' ? '' : 'page-break') ?>" style="padding-top: 1in;">
+      <div class="p1-title">※ 適正校(クラス )である旨の通知を受けた日本語教育機関に入学する場合の必要書類 &lt;認定用&gt;</div>
+      <table class="table-p1">
+        <colgroup>
+          <col style="width: 6%;">
+          <col style="width: 38%;">
+          <col style="width: 10%;">
+          <col style="width: 8%;">
+          <col style="width: 8%;">
+          <col style="width: 30%;">
+        </colgroup>
+        
+        <tr style="height: 32.5px;">
+          <th rowspan="2">番号</th>
+          <th rowspan="2">必要書類</th>
+          <th rowspan="2">提出の要否</th>
+          <th colspan="2">提出確認欄</th>
+          <th rowspan="2">備考</th>
+        </tr>
+        <tr style="height: 32.5px;">
+          <th colspan="2" style="font-weight: normal; font-size: 8.5pt;">いずれか選択</th>
+        </tr>
+
+        <tr style="height: 65px;">
+          <td class="text-center">1</td>
+          <td>「在留資格認定証明書交付申請書」</td>
+          <td class="col3-style">◯</td>
+          <td class="text-center"><span class="circle-txt">有</span></td>
+          <td class="text-center">無</td>
+          <td class="col5-style"></td>
+        </tr>
+        <tr style="height: 65px;">
+          <td class="text-center">2</td>
+          <td>提出書類一覧表(本表及び別紙「各種確認書」)</td>
+          <td class="col3-style">◯</td>
+          <td class="text-center"><span class="circle-txt">有</span></td>
+          <td class="text-center">無</td>
+          <td class="col5-style">別表掲載国・地域の出身国籍である申請人が外国の高等教育機関（大学等）を卒業し、その卒業証書等を提出する場合、「各種確認書」の提出は不要</td>
+        </tr>
+        <tr style="height: 65px;">
+          <td class="text-center">3</td>
+          <td>「旅券の身分事項ページ(写し)及び追記欄に記載がある旅券は追記欄ページ(写し)」</td>
+          <td class="col3-style">◯</td>
+          <td class="text-center"><?!= (aiValue === "有" ? '<span class="circle-txt">有</span>' : '有') ?></td>
+          <td class="text-center"><?!= (aiValue === "無" ? '<span class="circle-txt">無</span>' : '無') ?></td>
+          <td class="col5-style"><?= (aiValue === "無" ? "身分証明書あり" : "") ?></td>
+        </tr>
+        <tr style="height: 65px;">
+          <td class="text-center">4</td>
+          <td>日本語能力に係る資料</td>
+          <td class="col3-style">△<br><span style="font-size: 7.5pt;">(備考欄参照)</span></td>
+          <td class="text-center"><?!= (ajValue === "有" ? '<span class="circle-txt">有</span>' : '有') ?></td>
+          <td class="text-center"><?!= (ajValue === "無" ? '<span class="circle-txt">無</span>' : '無') ?></td>
+          <td class="col5-style">上記２の「各種確認書」で試験を選択した場合、試験の証明書を併せて提出（面接欄にも記載する場合を除く。）</td>
+        </tr>
+        <tr style="height: 65px;">
+          <td class="text-center">5</td>
+          <td>「申請人の身の回りの世話や生活上の相談及び助言等を行う体制について教育機関が確認したことを証する資料」</td>
+          <td class="col3-style">△<br><span style="font-size: 7.5pt;">(備考欄参照)</span></td>
+          <td class="text-center"><?!= (akValue === "有" ? '<span class="circle-txt">有</span>' : '有') ?></td>
+          <td class="text-center"><?!= (akValue === "無" ? '<span class="circle-txt">無</span>' : '無') ?></td>
+          <td class="col5-style">18歳未満の申請人が単身で生活する場合(入寮等する場合を除く。)</td>
+        </tr>
+        <tr style="height: 65px;">
+          <td class="text-center">6</td>
+          <td>認定不交付処分又は在留不許可処分について、処分理由を払拭する説明及び資料</td>
+          <td class="col3-style">△<br><span style="font-size: 7.5pt;">(備考欄参照)</span></td>
+          <td class="text-center"><?!= (alValue === "有" ? '<span class="circle-txt">有</span>' : '有') ?></td>
+          <td class="text-center"><?!= (alValue === "無" ? '<span class="circle-txt">無</span>' : '無') ?></td>
+          <td class="col5-style">在留資格認定証明書交付申請の不交付処分、在留期間更新許可申請又は在留資格変更許可申請の不許可処分を受けたことがある場合</td>
+        </tr>
+      </table>
+      
+      <table class="p1-footer-text">
+        <colgroup>
+          <col style="width: 30%;"> <col style="width: 15%;"> <col style="width: 55%;"> </colgroup>
+        <tr>
+          <td></td>
+          <td>教育機関の名称</td>
+          <td style="border-bottom: 1px solid #000;">○○日本語学校</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>申請人の氏名</td>
+          <td style="border-bottom: 1px solid #000;"><?= studentName ?></td>
+        </tr>
+      </table>
+    </div>
+
+    <? if (amValue !== 'はい') { ?>
+    <div>
+      <div class="p2-header">【別紙】各種確認書(所属機関作成用)</div>
+      <div class="section-num">1 修学に必要な言語</div>
+      <div style="margin-left: 10px; margin-bottom: 8px;"><span class="checkbox">■</span> 日本語 &nbsp;&nbsp;&nbsp; <span class="checkbox">□</span> その他 ( <span style="display:inline-block; width:80px; border-bottom:1px solid #000;"></span> )</div>
+
+      <div class="section-num">2 入学選考における語学能力の確認方法 Selection of Entrants</div>
+      
+      <div class="box-title"><span class="checkbox"><?= ((col3 && col3 !== "") ? "■" : "□") ?></span> 試験 Test</div>
+      <table class="borderless-data">
+        <colgroup>
+          <col style="width: 18%;">
+          <col style="width: 32%;">
+          <col style="width: 18%;">
+          <col style="width: 32%;">
+        </colgroup>
+        <tr>
+          <td>(1) 試験名:</td>
+          <td><strong><?= col3 ?></strong></td>
+          <td>(2) 級又は点数:</td>
+          <td><strong><?= col4 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(3) 試験日:</td>
+          <td><strong><?= col5 ?></strong></td>
+          <td>(4) 試験場所:</td>
+          <td><strong><?= col6 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(5) 受験番号:</td>
+          <td colspan="3"><strong><?= col7 ?></strong></td>
+        </tr>
+      </table>
+
+      <? if (col8 && col8 !== "") { ?>
+      <div class="box-title" style="margin-top: 2px;"><span class="checkbox" style="visibility: hidden;">■</span> 試験 Test (2回目)</div>
+      <table class="borderless-data">
+        <colgroup>
+          <col style="width: 18%;">
+          <col style="width: 32%;">
+          <col style="width: 18%;">
+          <col style="width: 32%;">
+        </colgroup>
+        <tr>
+          <td>(1) 試験名:</td>
+          <td><strong><?= col8 ?></strong></td>
+          <td>(2) 級又は点数:</td>
+          <td><strong><?= col9 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(3) 試験日:</td>
+          <td><strong><?= col10 ?></strong></td>
+          <td>(4) 試験場所:</td>
+          <td><strong><?= col11 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(5) 受験番号:</td>
+          <td colspan="3"><strong><?= col12 ?></strong></td>
+        </tr>
+      </table>
+      <? } ?>
+
+      <div class="box-title"><span class="checkbox"><?= ((interviewScore && interviewScore !== "") ? "■" : "□") ?></span> 面接 Interview <span class="sub-text">(面接内容を具体的に記載) ※オンライン面接も可</span></div>
+      <table class="table-p2">
+        <tr><td style="font-size: 8pt; padding: 6px; white-space: pre-wrap;"><?= interviewText ?></td></tr>
+      </table>
+
+      <div class="box-title"><span class="checkbox"><?= ((col15 && col15 !== "") ? "■" : "□") ?></span> 書類確認 Check of documents</div>
+      <table class="borderless-data">
+        <colgroup>
+          <col style="width: 5%;">
+          <col style="width: 15%;">
+          <col style="width: 30%;">
+          <col style="width: 20%;">
+          <col style="width: 30%;">
+        </colgroup>
+        <tr>
+          <td>(1)</td>
+          <td>機関名:</td>
+          <td colspan="3"><strong><?= col15 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>所在地:</td>
+          <td colspan="3"><strong><?= col16 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>電話番号:</td>
+          <td><strong><?= col17 ?></strong></td>
+          <td>代表者名:</td>
+          <td><strong><?= col18 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>URL:</td>
+          <td colspan="3"><strong><?= col19 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(2)</td>
+          <td>期間:</td>
+          <td colspan="3"><strong><?= col20 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(3)</td>
+          <td colspan="4">
+            総学習時間: <strong><?= col21 ?></strong> 時間 <span style="margin-left: 40px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;うち申請時点における既学習時間: <strong><?= col22 ?></strong> 時間</span>
+          </td>
+        </tr>
+      </table>
+
+      <? if (col23 && col23 !== "") { ?>
+      <div class="box-title" style="margin-top: 2px;"><span class="checkbox" style="visibility: hidden;">■</span> 書類確認 Check of documents (2か所目)</div>
+      <table class="borderless-data">
+        <colgroup>
+          <col style="width: 5%;">
+          <col style="width: 15%;">
+          <col style="width: 30%;">
+          <col style="width: 20%;">
+          <col style="width: 30%;">
+        </colgroup>
+        <tr>
+          <td>(1)</td>
+          <td>機関名:</td>
+          <td colspan="3"><strong><?= col23 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>所在地:</td>
+          <td colspan="3"><strong><?= col24 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>電話番号:</td>
+          <td><strong><?= col25 ?></strong></td>
+          <td>代表者名:</td>
+          <td><strong><?= col26 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>URL:</td>
+          <td colspan="3"><strong><?= col27 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(2)</td>
+          <td>期間:</td>
+          <td colspan="3"><strong><?= col28 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(3)</td>
+          <td colspan="4">
+            総学習時間: <strong><?= col29 ?></strong> 時間 <span style="margin-left: 40px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;うち申請時点における既学習時間: <strong><?= col30 ?></strong> 時間</span>
+          </td>
+        </tr>
+      </table>
+      <? } ?>
+
+      <? if (col39 && col39 !== "") { ?>
+      <div class="box-title" style="margin-top: 2px;"><span class="checkbox" style="visibility: hidden;">■</span> 書類確認 Check of documents (3か所目)</div>
+      <table class="borderless-data">
+        <colgroup>
+          <col style="width: 5%;">
+          <col style="width: 15%;">
+          <col style="width: 30%;">
+          <col style="width: 20%;">
+          <col style="width: 30%;">
+        </colgroup>
+        <tr>
+          <td>(1)</td>
+          <td>機関名:</td>
+          <td colspan="3"><strong><?= col39 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>所在地:</td>
+          <td colspan="3"><strong><?= col40 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>電話番号:</td>
+          <td><strong><?= col41 ?></strong></td>
+          <td>代表者名:</td>
+          <td><strong><?= col42 ?></strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>URL:</td>
+          <td colspan="3"><strong><?= col43 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(2)</td>
+          <td>期間:</td>
+          <td colspan="3"><strong><?= col44 ?></strong></td>
+        </tr>
+        <tr>
+          <td>(3)</td>
+          <td colspan="4">
+            総学習時間: <strong><?= col45 ?></strong> 時間 <span style="margin-left: 40px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;うち申請時点における既学習時間: <strong><?= col46 ?></strong> 時間</span>
+          </td>
+        </tr>
+      </table>
+      <? } ?>
+
+      <div class="box-title"><span class="checkbox"><?= ((col31 && col31 !== "") ? "■" : "□") ?></span> その他</div>
+      <table class="table-p2">
+        <tr><td style="font-size: 8pt; padding: 6px; white-space: pre-wrap; min-height: 12px;"><?= col31 ?></td></tr>
+      </table>
+
+      <div class="box-title"><span class="checkbox"><?= ((placementScore && placementScore !== "") ? "■" : "□") ?></span> その他 <span class="sub-text">(上記に記載した方法以外の確認方法(独自の入学試験等))(詳細な内容) others (details)</span></div>
+      <table class="table-p2">
+        <tr><td style="font-size: 8pt; padding: 6px; white-space: pre-wrap;"><?= placementText ?></td></tr>
+      </table>
+
+      <table class="p2-footer-text">
+        <colgroup>
+          <col style="width: 15%;">
+          <col style="width: 25%;"> 
+          <col style="width: 15%;">
+          <col style="width: 45%;">
+        </colgroup>
+        <tr>
+          <td>教育機関の名称</td>
+          <td style="border-bottom: 1px solid #000;" class="bold">○○日本語学校</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>課程名等</td>
+          <td style="border-bottom: 1px solid #000;" class="bold"><?= course ?></td>
+          <td style="text-align: right; padding-right: 10px;">申請人の氏名</td>
+          <td style="border-bottom: 1px solid #000;" class="bold"><?= studentName ?></td>
+        </tr>
+      </table>
+    </div><?
+      // ⚠️ page-break-BEFORE, never -after. shinsei_exportBatchMergedFromWebApp splices each
+      // student's body into one document and relies on the last rendered element carrying no
+      // page break; a trailing one would add a blank sheet to EVERY student in a batch.
+      var _hasExtras = (extraExams && extraExams.length) || (extraEdus && extraEdus.length);
+      if (_hasExtras) {
+    ?>
+    <div style="page-break-before: always;">
+      <div class="p2-header">【別紙（続き）】各種確認書(所属機関作成用)</div>
+
+      <? extraExams.forEach(function (x, i) { ?>
+      <div class="xblk">
+        <div class="box-title" style="margin-top: 2px;"><span class="checkbox" style="visibility: hidden;">■</span> 試験 Test (<?= i + fixedExams + 1 ?>回目)</div>
+        <table class="borderless-data">
+          <colgroup>
+            <col style="width: 18%;">
+            <col style="width: 32%;">
+            <col style="width: 18%;">
+            <col style="width: 32%;">
+          </colgroup>
+          <tr>
+            <td>(1) 試験名:</td>
+            <td><strong><?= x.name ?></strong></td>
+            <td>(2) 級又は点数:</td>
+            <td><strong><?= x.score ?></strong></td>
+          </tr>
+          <tr>
+            <td>(3) 試験日:</td>
+            <td><strong><?= x.date ?></strong></td>
+            <td>(4) 試験場所:</td>
+            <td><strong><?= x.place ?></strong></td>
+          </tr>
+          <tr>
+            <td>(5) 受験番号:</td>
+            <td colspan="3"><strong><?= x.no ?></strong></td>
+          </tr>
+        </table>
+      </div>
+      <? }); ?>
+
+      <? extraEdus.forEach(function (e, i) { ?>
+      <div class="xblk">
+        <div class="box-title" style="margin-top: 2px;"><span class="checkbox" style="visibility: hidden;">■</span> 書類確認 Check of documents (<?= i + fixedEdus + 1 ?>か所目)</div>
+        <table class="borderless-data">
+          <colgroup>
+            <col style="width: 5%;">
+            <col style="width: 15%;">
+            <col style="width: 30%;">
+            <col style="width: 20%;">
+            <col style="width: 30%;">
+          </colgroup>
+          <tr>
+            <td>(1)</td>
+            <td>機関名:</td>
+            <td colspan="3"><strong><?= e.name ?></strong></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td>所在地:</td>
+            <td colspan="3"><strong><?= e.addr ?></strong></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td>電話番号:</td>
+            <td><strong><?= e.tel ?></strong></td>
+            <td>代表者名:</td>
+            <td><strong><?= e.rep ?></strong></td>
+          </tr>
+          <tr>
+            <td></td>
+            <td>URL:</td>
+            <td colspan="3"><strong><?= e.url ?></strong></td>
+          </tr>
+          <tr>
+            <td>(2)</td>
+            <td>期間:</td>
+            <td colspan="3"><strong><?= e.period ?></strong></td>
+          </tr>
+          <tr>
+            <td>(3)</td>
+            <td colspan="4">
+              総学習時間: <strong><?= e.total ?></strong> 時間 <span style="margin-left: 40px;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;うち申請時点における既学習時間: <strong><?= e.done ?></strong> 時間</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+      <? }); ?>
+
+      <table class="p2-footer-text">
+        <colgroup>
+          <col style="width: 15%;">
+          <col style="width: 25%;"> 
+          <col style="width: 15%;">
+          <col style="width: 45%;">
+        </colgroup>
+        <tr>
+          <td>教育機関の名称</td>
+          <td style="border-bottom: 1px solid #000;" class="bold">○○日本語学校</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>課程名等</td>
+          <td style="border-bottom: 1px solid #000;" class="bold"><?= course ?></td>
+          <td style="text-align: right; padding-right: 10px;">申請人の氏名</td>
+          <td style="border-bottom: 1px solid #000;" class="bold"><?= studentName ?></td>
+        </tr>
+      </table>
+    </div>
+    <? } ?>
+    <? } ?>
+  </body>
+</html>

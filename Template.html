@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Dormitory Information</title>
+    <style>
+        @page { size: A4; margin: 10mm; }
+        body { font-family: 'Helvetica Neue', Arial, 'Hiragino Sans', sans-serif; font-size: 11px; color: #333; line-height: 1.2; margin: 0; padding: 0; }
+        h1, h2, h3 { margin: 0; padding: 0; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .text-left { text-align: left; }
+        .bold { font-weight: bold; }
+        .red-text { color: red; }
+
+        table { width: 100%; border-collapse: collapse; margin-bottom: 5px; }
+        td { vertical-align: top; }
+
+        .header-section { margin-bottom: 5px; }
+        .room-number-box { border: 2px solid #000; padding: 3px 12px; text-align: center; font-size: 16px; font-weight: bold; display: inline-block; }
+        .info-table td { padding: 2px; border-bottom: 1px dashed #ccc; }
+        .info-label { font-weight: bold; width: 30%; }
+
+        .garbage-table th, .garbage-table td { border: 1px solid #000; padding: 4px; text-align: center; }
+        .garbage-table th { background-color: #f0f0f0; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <table class="header-section">
+        <tr>
+            <td class="text-left" style="width: 75%; vertical-align: middle; white-space: nowrap;">
+                <div style="font-size: 10px; color: #666;">{{Furigana}}</div>
+                <h2 style="font-size: 20px; margin: 2px 0;">{{Building_Name_EN}} / {{Building_Name_JP}}</h2>
+                <div style="font-size: 12px; white-space: normal;">住所: {{Address_JP}}</div>
+                <div style="font-size: 12px; white-space: normal;">{{Address_EN}}</div>
+            </td>
+            <td class="text-right" style="width: 25%; vertical-align: middle;">
+                <div class="bold" style="margin-bottom: 3px;">{{Date}}</div>
+                <div class="room-number-box">{{Room_Number}} 号室</div>
+            </td>
+        </tr>
+    </table>
+
+    <table style="{{DISPLAY_Header_Images}}">
+        <tr>
+            <td class="text-center" style="width: 30%; {{DISPLAY_Exterior}}">
+                <div class="bold" style="margin-bottom: 2px;">外観 / Outer appearance</div>
+                <img src="{{Image_Exterior}}" style="max-height: 160px; max-width: 100%; object-fit: contain;" alt="Exterior Photo"/>
+                <div style="font-size: 10px; color: #555; margin-top: 2px; {{DISPLAY_CAPTION_Exterior}}">{{Caption_Exterior}}</div>
+            </td>
+            <td class="text-center" style="width: 40%;">
+                <div class="bold" style="margin-bottom: 2px;">学校までの経路QR / Route to school</div>
+                <div style="display: flex; justify-content: center; gap: 12px;">
+                    <div style="{{DISPLAY_Route_1}}">
+                        <img src="{{QR_Route_1}}" style="height: 130px; width: auto; object-fit: contain; display: block; margin: 0 auto;" alt="Route 1"/>
+                        <div class="bold" style="font-size: 10px; margin-top: 2px;">Second</div>
+                    </div>
+                    <div style="{{DISPLAY_Route_2}}">
+                        <img src="{{QR_Route_2}}" style="height: 130px; width: auto; object-fit: contain; display: block; margin: 0 auto;" alt="Route 2"/>
+                        <div class="bold" style="font-size: 10px; margin-top: 2px;">Main</div>
+                    </div>
+                </div>
+            </td>
+            <td class="text-center" style="width: 30%;">
+                <div class="bold" style="margin-bottom: 2px;">ハザードマップ / Hazard Map</div>
+                <img src="{{QR_Hazard_Map}}" style="height: 130px; width: auto; object-fit: contain;" alt="Hazard Map QR"/>
+            </td>
+        </tr>
+    </table>
+
+    <table class="info-table">
+        <tr>
+            <td class="info-label">家賃 / Rent:</td>
+            <td><span class="bold" style="font-size: 14px;">{{Rent_Price}}</span> 円 (1ヶ月)</td>
+        </tr>
+        {{Utility_Rows}}
+    </table>
+
+    <table class="info-table">
+        <tr style="{{DISPLAY_Wifi}}">
+            <td class="info-label">Wi-Fi:</td>
+            <td><span class="bold">{{Wifi_Info}}</span></td>
+        </tr>
+        <tr style="{{DISPLAY_AutoLock}}">
+            <td class="info-label">オートロック / Auto Lock:</td>
+            <td><span class="bold">{{Auto_Lock}}</span></td>
+        </tr>
+        <tr style="{{DISPLAY_RoomCode}}">
+            <td class="info-label">部屋パスワード / Room Code:</td>
+            <td><span class="bold">{{Room_Code}}</span></td>
+        </tr>
+        <tr style="{{DISPLAY_Mailbox}}">
+            <td class="info-label">ポスト / Mailbox:</td>
+            <td><span class="bold">{{Mailbox_Code}}</span></td>
+        </tr>
+        <tr style="{{DISPLAY_DeliveryBox}}">
+            <td class="info-label">宅配ボックス / Delivery Box:</td>
+            <td>Security code / 暗証番号: <span class="bold">{{Delivery_Box_Code}}</span></td>
+        </tr>
+        <tr style="{{DISPLAY_Bicycle_Number}}">
+            <td class="info-label">駐輪場番号 / Bicycle Parking No:</td>
+            <td><span class="bold">{{Bicycle_Number}}</span></td>
+        </tr>
+    </table>
+
+    <h3 style="margin-top: 8px; font-size: 13px;">ゴミ / Garbage:</h3>
+    <div class="bold" style="margin-bottom: 4px;">
+        ゴミは当日の朝の8時までに捨ててください。<br>
+        Please dispose the garbage by 8 AM on the day of collection.
+    </div>
+
+    <table class="garbage-table">
+        <tr>
+            <th>Type/種類</th>
+            <th>Date/曜日</th>
+            <th>Type of bag/ゴミ袋</th>
+        </tr>
+        <tr style="{{DISPLAY_Garbage_Household}}">
+            <td>Household garbage<br>家庭ごみ</td>
+            <td>{{Garbage_Household_Date}}</td>
+            <td>{{Garbage_Household_Bag}}</td>
+        </tr>
+        <tr style="{{DISPLAY_Garbage_BurnablePlastic}}">
+            <td>Burnable trash (Including Plastic)<br>燃えるゴミ(プラスチックを含む)</td>
+            <td>{{Garbage_BurnablePlastic_Date}}</td>
+            <td>{{Garbage_BurnablePlastic_Bag}}</td>
+        </tr>
+        <tr style="{{DISPLAY_Garbage_Can}}">
+            <td>Can/Bottle/PET Bottle<br>カン・ビン・ペットボトル</td>
+            <td>{{Garbage_Can_Date}}</td>
+            <td>{{Garbage_Can_Bag}}</td>
+        </tr>
+        <tr style="{{DISPLAY_Garbage_Plastic}}">
+            <td>Plastic<br>プラスチック</td>
+            <td>{{Garbage_Plastic_Date}}</td>
+            <td>{{Garbage_Plastic_Bag}}</td>
+        </tr>
+        <tr style="{{DISPLAY_Garbage_Paper}}">
+            <td>Waste paper<br>雑紙</td>
+            <td>{{Garbage_Paper_Date}}</td>
+            <td>{{Garbage_Paper_Bag}}</td>
+        </tr>
+    </table>
+
+    <div style="margin-top: 4px;">
+        {{Photo_Cards}}
+    </div>
+    {{Garbage_Place_Info_Line}}
+
+    <div style="{{DISPLAY_Remarks}} margin-top: 8px; padding: 8px; border: 1px solid #999; background-color: #f9f9f9;">
+        <div class="bold" style="margin-bottom: 2px;">備考 / Remarks:</div>
+        <div>{{Remarks}}</div>
+    </div>
+
+</body>
+</html>

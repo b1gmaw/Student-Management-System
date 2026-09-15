@@ -1,0 +1,16 @@
+# Playwright lives inside the run skill; the driver is committed, its deps are not.
+.claude/skills/*/node_modules/
+.claude/skills/*/shots/
+
+# Stray agent session logs dropped in the working dir; not part of the app.
+codex-session-*.md
+
+# Secrets. There is no .env today; this keeps one from ever being committed.
+.env
+.env.*
+
+# Kept out of this public copy on purpose: deploy settings naming the Apps Script
+# projects, and the maintainer's private working notes.
+.clasp.json
+.clasp-*.json
+CLAUDE.md

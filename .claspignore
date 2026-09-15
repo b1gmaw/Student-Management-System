@@ -1,0 +1,10 @@
+# Local-only files. Without this clasp pushes anything matching its script
+# extensions, including subdirectories (skipSubdirectories is false), so test
+# files would land in the live Apps Script project.
+tests/**
+**/*.test.js
+node_modules/**
+.git/**
+# The run skill and its playwright install. skipSubdirectories is false, so
+# without this clasp walks .claude/ and pushes anything matching its extensions.
+.claude/**

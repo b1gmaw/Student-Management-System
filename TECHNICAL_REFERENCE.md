@@ -4,7 +4,7 @@ Architecture, data model, function reference and known quirks, written so that
 any developer — including the original author returning after time away — can
 understand and safely modify this system.
 
-See `CLAUDE.md` for the workflow rules that must be followed when editing.
+Code comments that cite `CLAUDE.md` refer to the maintainer's private working notes, which are not published; the tests enforce the rules they describe.
 
 ---
 

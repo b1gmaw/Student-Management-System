@@ -1,8 +1,7 @@
 # Local test suites
 
 There is no test framework. Each file is a standalone Node script that
-transcribes logic out of `Code.js` / `Index.html` and asserts against it, per
-the Testing section of `CLAUDE.md`.
+transcribes logic out of `Code.js` / `Index.html` and asserts against it.
 
 Run them all:
 

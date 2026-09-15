@@ -99,7 +99,7 @@ screenshots it writes are ordinary files on disk.
 node tests/mobile.test.js   # one suite
 ```
 
-Syntax-check both files before handing anything over (CLAUDE.md rule 4):
+Syntax-check both files before handing anything over:
 
 ```bash
 cp Code.js /tmp/c.js && node --check /tmp/c.js

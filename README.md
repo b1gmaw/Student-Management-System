@@ -85,3 +85,13 @@ version *number*, which tells you nothing about whether the *content* agrees.
 | `tests/` | 43 suites; `./tests/run-all.sh`. Excluded from `clasp push` by `.claspignore`. |
 | `.claude/skills/run-local/` | Local render driver (Playwright) |
 | `.clasp.json` / `.clasp-staging.json` | Production / staging project ids |
+
+
+## License
+
+Copyright (C) 2026 b1gmaw
+
+This program is free software: you can redistribute it and/or modify it under the terms of
+the GNU Affero General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version. It is distributed WITHOUT
+ANY WARRANTY. See [LICENSE](LICENSE) for the full text.

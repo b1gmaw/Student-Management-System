@@ -27,6 +27,21 @@ function normName(v) {
 }
 
 // rows: [ , teacherId, teacherName, date, period, status, student, nat, link, , course, inCharge ]
+// ⚠️ NOT `status === "Booked"`. A booking carrying a request keeps its student and still
+// happens: 交代 leaves Status at Reassign_Pending until the other teacher accepts, and
+// キャンセル依頼 at Cancel_Request until an admin approves. Both used to vanish from ホーム while
+// the bell showed the request — reported 2026-09-16 as "booked but not showing". Section 6
+// exercises it, and binds this transcription to Code.js.
+function liveState(status, student) {
+  const s = String(status == null ? "" : status).trim();
+  const who = String(student == null ? "" : student).trim();
+  if (s === "Booked") return "";
+  if (who === "") return null;
+  if (s === "Reassign_Pending") return "reassign";
+  if (s === "Cancel_Request") return "cancelreq";
+  return null;
+}
+
 function upcoming(rows, me, today, cutoff) {
   const myRole = String(me.role || "");
   if (myRole !== "teacher" && myRole !== "sales") return [];
@@ -34,7 +49,8 @@ function upcoming(rows, me, today, cutoff) {
   const meId = String(me.id || "").trim();
   let out = [];
   for (const r of rows) {
-    if (String(r[5]).trim() !== "Booked") continue;
+    const state = liveState(r[5], r[6]);
+    if (state === null) continue;
     const date = String(r[3] || "").trim();
     if (date < today || date > cutoff) continue;
     const mine = (myRole === "teacher")
@@ -42,7 +58,7 @@ function upcoming(rows, me, today, cutoff) {
       : normName(r[11]) === meName && meName !== "";
     if (!mine) continue;
     out.push({ date, period: String(r[4] || ""), student: String(r[6] || ""),
-               teacherName: String(r[2] || "") });
+               teacherName: String(r[2] || ""), state });
   }
   out.sort((a, b) => a.date !== b.date ? (a.date < b.date ? -1 : 1)
                                        : String(a.period).localeCompare(String(b.period), "ja"));
@@ -143,6 +159,56 @@ console.log("\n5. ordering");
   ];
   const s = upcoming(sameDay, TEACHER, TODAY, CUTOFF);
   check("same-day slots order by period", s[0].student === "A", JSON.stringify(s.map(r => r.student)));
+}
+
+console.log("\n6. ⚠️ a booking with a request on it is STILL an interview");
+{
+  // Reported 2026-09-16: a 営業's interview, booked for that same day, was missing from ホーム.
+  // 交代 moves Status to Reassign_Pending and キャンセル依頼 to Cancel_Request, and both keep the
+  // student — the interview happens unless somebody acts on the request. The bell showed the
+  // request while ホーム dropped the interview.
+  const REQ = [
+    row("T1", "甲野", "2026-08-07", "09:00 ~ 09:30", "Reassign_Pending", "StudentG", "乙山"),
+    row("T1", "甲野", "2026-08-08", "10:00 ~ 10:30", "Cancel_Request",   "StudentH", "乙山"),
+    row("T1", "甲野", "2026-08-09", "11:00 ~ 11:30", "Reassign_Pending", "",     "乙山"),  // an offered slot
+    row("T1", "甲野", "2026-08-10", "12:00 ~ 12:30", "Available",        "",     "乙山")
+  ];
+  const s = upcoming(REQ, SALES, TODAY, CUTOFF);
+  const names = s.map(r => r.student);
+  check("a 交代待ち booking is listed", names.indexOf("StudentG") !== -1, JSON.stringify(names));
+  check("...and says so, so the row explains itself",
+    (s.find(r => r.student === "StudentG") || {}).state === "reassign", JSON.stringify(s));
+  check("a キャンセル依頼中 booking is listed", names.indexOf("StudentH") !== -1, JSON.stringify(names));
+  check("...with its own state",
+    (s.find(r => r.student === "StudentH") || {}).state === "cancelreq", JSON.stringify(s));
+  // ⚠️ The student is what makes those states count. Reassign_Pending on an EMPTY row is a slot
+  // being offered around, not somebody's interview.
+  check("⚠️ a pending row with no student is not an interview", names.indexOf("") === -1, JSON.stringify(names));
+  check("Available is still not an interview", s.length === 2, JSON.stringify(names));
+  // A plain booking keeps an empty state, so an ordinary row renders exactly as before.
+  check("a plain booking carries no state",
+    upcoming(SCHED, SALES, TODAY, CUTOFF).every(r => r.state === ""), "");
+
+  // mutation: the old status test hides both.
+  const old = REQ.filter(r => String(r[5]).trim() === "Booked");
+  check("  mutation: the old `=== Booked` test finds neither", old.length === 0, JSON.stringify(old));
+
+  // ⚠️ BINDING: everything above exercises the transcription at the top of this file. Without
+  // this, Code.js could narrow back to `=== "Booked"` and the suite would still pass — the
+  // cellsafe §8 lesson.
+  const fs2 = require('fs'), path2 = require('path');
+  const SRC = fs2.readFileSync(path2.join(__dirname, '..', 'Code.js'), 'utf8');
+  const at = SRC.indexOf('\nfunction _scheduleLiveState_(');
+  const body = at === -1 ? '' : SRC.slice(at, SRC.indexOf('\n}\n', at));
+  check("Code.js really has _scheduleLiveState_", body.length > 100, "the rule must live in exactly one place");
+  check("...and it names both pending states",
+    body.indexOf('"Reassign_Pending"') !== -1 && body.indexOf('"Cancel_Request"') !== -1, body);
+  check("...returning null only after the student check",
+    body.indexOf('if (who === "") return null;') !== -1 &&
+    body.indexOf('if (who === "") return null;') < body.indexOf('"Reassign_Pending"'), body);
+  check("getUpcomingForUser asks it rather than testing the status itself",
+    /const state = _scheduleLiveState_\(data\[i\]\[5\], data\[i\]\[6\]\);/.test(SRC) &&
+    SRC.indexOf('if (String(data[i][5]).trim() !== "Booked") continue;') === -1, "");
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

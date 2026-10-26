@@ -98,10 +98,12 @@ console.log("\n3. ⚠️ free text no longer reaches the sheet unguarded");
 {
   // This module had NO guard at all: 教育機関名, 所在地 and その他 went straight in, so a
   // value starting with = ran as a formula the next time anyone opened the workbook.
-  check("⚠️ the insert path is wrapped", /appendRow\(_cellSafeRow_\(newRow\)\)/.test(CODE),
+  // The phone columns are forced to text INSIDE the guard (§13): _cellSafe_ leaves a value
+  // that already starts with ' alone, so the two never stack into two apostrophes.
+  check("⚠️ the insert path is wrapped", /appendRow\(_cellSafeRow_\(_shinseiForceText_\(newRow\)\)\)/.test(CODE),
     "the formula-injection hole the rest of the app guards");
   check("⚠️ the update path is wrapped",
-    /setValues\(\[_cellSafeRow_\(valuesToSet\)\]\)/.test(CODE), "");
+    /setValues\(\[_cellSafeRow_\(_shinseiForceText_\(valuesToSet\)\)\]\)/.test(CODE), "");
   check("...and nothing writes around them",
     !/appendRow\((?!_cellSafeRow_)/.test(CODE) && !/setValues\(\[(?!_cellSafeRow_)/.test(CODE),
     "a third write site would be unguarded again");
@@ -609,19 +611,451 @@ console.log("\n12. 申請 exports and the preview check export_shinsei on the SE
       return new RegExp('id="' + id + '"[^>]*data-perm="export_shinsei"').test(HTML12);
     }), "");
 
-  const run = function (src, enforcing, allowed) {
+  // No mode argument: observe mode was removed on 2026-09-21, and with it the early return that let
+  // every export through when the switch was off.
+  const run = function (src, allowed) {
     const ctx = vm12.createContext({
-      _authEnforcing_: function () { return enforcing; },
       _hasPerm_: function (r, p, needed) { return needed === 'export_shinsei' && allowed; }
     });
     vm12.runInContext(src, ctx);
     try { ctx._requireShinseiExport_(); return 'ok'; } catch (e) { return e.message; }
   };
-  check("without the permission it refuses", run(helper, true, false) === '権限がありません', run(helper, true, false));
-  check("with it (admin-level included, which _hasPerm_ grants) it passes", run(helper, true, true) === 'ok', "");
-  check("observe mode lets it through, as every session guard does", run(helper, false, false) === 'ok', "");
+  check("without the permission it refuses", run(helper, false) === '権限がありません', run(helper, false));
+  check("with it (admin-level included, which _hasPerm_ grants) it passes", run(helper, true) === 'ok', "");
+  check("⚠️ there is no early exit that skips the check",
+    !/return;/.test(helper.slice(helper.indexOf('{'), helper.indexOf('_hasPerm_('))),
+    "an early return before _hasPerm_ is how observe mode let every export through");
   check("  mutation: a helper that never throws is caught",
-    run(helper.replace('throw new Error("権限がありません")', 'return'), true, false) === 'ok', "");
+    run(helper.replace('throw new Error("権限がありません")', 'return'), false) === 'ok', ""); 
+}
+
+console.log("\n13. ⚠️ phone numbers are stored as typed, and a broken cell is recovered rather than re-saved");
+{
+  // ⚠️ WHY. 電話番号 showed #ERROR! on records saved AFTER the formula guard shipped. getValues()
+  // hands a broken formula cell back as the text "#ERROR!", 既存編集 loaded that into the form, and
+  // データ更新 wrote it over the cell — destroying the formula, which was the only copy of what was
+  // typed. Separately, a digits-only 0751234567 was stored as the number 751234567.
+  // These run the REAL functions in a vm, and each guard is run against its old shape, which must fail.
+  const vm13 = require('vm');
+  const CODE13 = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8');
+  const fn13 = function (src, name) {
+    const i = src.indexOf('\nfunction ' + name + '(');
+    if (i < 0) return '';
+    // A one-line function closes on its own line (_cellSafeRow_ is one).
+    const line = src.slice(i + 1, src.indexOf('\n', i + 1));
+    const o = (line.match(/\{/g) || []).length, c = (line.match(/\}/g) || []).length;
+    if (o > 0 && o === c) return line;
+    return src.slice(i + 1, src.indexOf('\n}\n', i) + 2);
+  };
+  const constLine = function (name) {
+    const m = SRC.match(new RegExp('^const ' + name + ' = [^\\n]*$', 'm'));
+    return m ? m[0].replace(/^const /, 'var ') : '';
+  };
+  const mutate = function (src, from, to) {
+    if (src.split(from).length !== 2) throw new Error('mutation anchor not unique: ' + from.slice(0, 60));
+    return src.replace(from, to);
+  };
+
+  // --- the phone column list is DERIVED from the form
+  const phoneIds = [];
+  const reTel = /\{ id: (\d+), label: "電話番号[^"]*"/g;
+  let mt;
+  while ((mt = reTel.exec(HTML))) phoneIds.push(parseInt(mt[1], 10));
+  const decl = (SRC.match(/const SHINSEI_TEXT_COLS = \[([^\]]*)\];/) || [])[1] || '';
+  const cols = decl.split(',').map(function (s) { return parseInt(s, 10); }).filter(function (n) { return !isNaN(n); });
+  const asSet = function (a) { return a.slice().sort(function (x, y) { return x - y; }).join(','); };
+  check("SHINSEI_TEXT_COLS is exactly the form's 電話番号 fields",
+    phoneIds.length > 0 && asSet(phoneIds) === asSet(cols),
+    "form: " + asSet(phoneIds) + " / declared: " + asSet(cols));
+
+  const base = [constLine('SHINSEI_COLS'), constLine('SHINSEI_TEXT_COLS'),
+    fn13(CODE13, '_cellSafe_'), fn13(CODE13, '_cellSafeRow_')];
+  const FORCE = fn13(SRC, '_shinseiForceText_'), RECOVER = fn13(SRC, '_shinseiRecoverFormulaText_');
+  check("the helpers were found", base.every(Boolean) && FORCE && RECOVER, "an empty slice makes the checks below vacuous");
+
+  const pure = function (force, recover) {
+    const ctx = vm13.createContext({});
+    vm13.runInContext(base.concat([force, recover]).join('\n\n'), ctx);
+    return ctx;
+  };
+  const P = pure(FORCE, RECOVER);
+  const row = new Array(48).fill('');
+  row[16] = '0751234567'; row[24] = '+81 75 123 4567'; row[40] = ''; row[14] = '075'; row[15] = '+81 x';
+  const out = P._cellSafeRow_(P._shinseiForceText_(row));
+  check("a digits-only phone keeps its leading zero", out[16] === "'0751234567", JSON.stringify(out[16]));
+  check("⚠️ a +81 phone gets ONE apostrophe, not two", out[24] === "'+81 75 123 4567", JSON.stringify(out[24]));
+  check("an empty phone stays empty", out[40] === '', JSON.stringify(out[40]));
+  check("a non-phone column is not forced to text", P._shinseiForceText_(row)[14] === '075', "");
+  check("...but still passes through the formula guard", out[15] === "'+81 x", JSON.stringify(out[15]));
+  check("an already-escaped phone is not doubled", P._shinseiForceText_(row.map(function (v, i) { return i === 16 ? "'0751" : v; }))[16] === "'0751", "");
+  check("the row length is unchanged", out.length === 48, String(out.length));
+  const P0 = pure(mutate(FORCE, `return s.charAt(0) === "'" ? s : "'" + s;`, 'return s;'), RECOVER);
+  check("  mutation: without the prefix the leading zero is lost again",
+    P0._cellSafeRow_(P0._shinseiForceText_(row))[16] === '0751234567', "");
+
+  // ⚠️ MEASURED (probeSheetsTextInput, staging 2026-09-15): appendRow stores a typed
+  // "+81 75 123 4567" as a formula whose text is EXACTLY that — Sheets adds no =. So the
+  // measured shape must come back unchanged, and the =-stripping rule is only for a formula
+  // that genuinely begins "=+", which the probe did not produce.
+  check("⚠️ the measured formula text +81 75 123 4567 comes back unchanged",
+    P._shinseiRecoverFormulaText_('+81 75 123 4567') === '+81 75 123 4567', "");
+  check("+977-1-4412345 (which evaluated to a NUMBER) comes back unchanged",
+    P._shinseiRecoverFormulaText_('+977-1-4412345') === '+977-1-4412345', "");
+  check("a formula written as =+81 75 123 4567 also recovers to the phone",
+    P._shinseiRecoverFormulaText_('=+81 75 123 4567') === '+81 75 123 4567', "");
+  check("an injected =IMPORTXML keeps its = ...",
+    P._shinseiRecoverFormulaText_('=IMPORTXML("x")') === '=IMPORTXML("x")', "");
+  check("...and the guard then stores it inert",
+    P._cellSafe_(P._shinseiRecoverFormulaText_('=IMPORTXML("x")')) === `'=IMPORTXML("x")`, "");
+  const P1 = pure(FORCE, mutate(RECOVER, '? s.slice(1) : s', '? s.slice(1) : s.slice(1)'));
+  check("  mutation: stripping every = is caught",
+    P1._shinseiRecoverFormulaText_('=IMPORTXML("x")') !== '=IMPORTXML("x")', "");
+
+  // --- 既存編集 reads a formula cell as its recovered text
+  const EDIT = fn13(SRC, 'shinsei_getStudentDataForEdit');
+  const runEdit = function (editSrc) {
+    const header = new Array(48).fill('h');
+    const vals = new Array(48).fill('');
+    vals[0] = 'サンプル 太郎'; vals[14] = '学校'; vals[16] = '#ERROR!'; vals[24] = -4411369; vals[40] = '#ERROR!';
+    const frm = new Array(48).fill('');
+    // The formula text exactly as appendRow stored it on staging. vals[40] is literal text: no formula.
+    frm[16] = '+81 75 123 4567'; frm[24] = '+977-1-4412345';
+    const sheet = {
+      getDataRange: function () { return { getValues: function () { return [header, vals.slice()]; } }; },
+      getRange: function (r, c, nr, nc) {
+        return { getFormulas: function () { if (r !== 2 || c !== 1 || nr !== 1) throw new Error('wrong range'); return [frm.slice(0, nc)]; } };
+      }
+    };
+    const ctx = vm13.createContext({
+      _requireSession_: function () {},
+      _requireShinseiPerm_: function () {},   // authz.test §1 covers the permission
+      SpreadsheetApp: { getActiveSpreadsheet: function () { return { getSheetByName: function () { return sheet; } }; } }
+    });
+    vm13.runInContext(base.concat([FORCE, RECOVER, editSrc]).join('\n\n'), ctx);
+    return ctx.shinsei_getStudentDataForEdit('サンプル 太郎');
+  };
+  const a = runEdit(EDIT);
+  check("⚠️ a #ERROR! formula cell loads as the typed phone, not as #ERROR!", a[17] === '+81 75 123 4567', JSON.stringify(a[17]));
+  check("a formula that evaluated to a number loads as the typed phone", a[25] === '+977-1-4412345', JSON.stringify(a[25]));
+  check("literal #ERROR! text is shown as it is — hiding it would hide the loss", a[41] === '#ERROR!', JSON.stringify(a[41]));
+  check("ordinary cells are untouched", a[1] === 'サンプル 太郎' && a[15] === '学校', "");
+  const a0 = runEdit(mutate(EDIT, 'if (formulas[i]) { rowData[i] = _shinseiRecoverFormulaText_(formulas[i]); continue; }', ''));
+  check("  mutation: reading values alone hands #ERROR! to the form again", a0[17] === '#ERROR!', JSON.stringify(a0[17]));
+
+  // --- the one-off repair
+  const MIG = fn13(SRC, 'migrateShinseiFormulaCells');
+  const DSH = fn13(SRC, '_shinseiDataSheet_');
+  const runMig = function (migSrc, snapOk, grid) {
+    const ev = [];
+    const sheet = {
+      getName: function () { return 'Shinsei_Data'; },
+      getDataRange: function () { return { getFormulas: function () { return grid; } }; },
+      getRange: function (r, c) { return { setValue: function (v) { ev.push(['set', r, c, v]); } }; }
+    };
+    const ctx = vm13.createContext({
+      _requireMaintenanceUnlock_: function () { ev.push(['unlock']); },
+      LockService: { getDocumentLock: function () { return { tryLock: function () { ev.push(['lock']); return true; }, releaseLock: function () { ev.push(['release']); } }; } },
+      SpreadsheetApp: { getActiveSpreadsheet: function () { return { getSheetByName: function () { return sheet; } }; }, flush: function () {} },
+      _snapshotSheet_: function (n) { ev.push(['snap', n]); return snapOk; },
+      _logActivity_: function (actor, action, target, details) { ev.push(['log', action, details]); }
+    });
+    vm13.runInContext(base.concat([FORCE, RECOVER, DSH, migSrc]).join('\n\n'), ctx);
+    let ret;
+    try { ret = ctx.migrateShinseiFormulaCells(); } catch (e) { ret = 'THREW ' + e.message; }
+    return { ev: ev, ret: ret };
+  };
+  const grid = [new Array(48).fill(''), new Array(48).fill('')];
+  grid[1][16] = '+81 75 123 4567'; grid[1][30] = '=IMPORTXML("x")';   // the phone as appendRow stored it
+  const m1 = runMig(MIG, true, grid);
+  const kinds = m1.ev.map(function (e) { return e[0]; });
+  const sets = m1.ev.filter(function (e) { return e[0] === 'set'; });
+  check("the unlock comes first", kinds[0] === 'unlock', kinds.join(','));
+  check("⚠️ the sheet copy is taken before any cell is written",
+    kinds.indexOf('snap') !== -1 && kinds.indexOf('snap') < kinds.indexOf('set'), kinds.join(','));
+  check("the phone is rewritten as text, one apostrophe",
+    sets.some(function (s) { return s[1] === 2 && s[2] === 17 && s[3] === "'+81 75 123 4567"; }), JSON.stringify(sets));
+  check("an injected formula is rewritten inert",
+    sets.some(function (s) { return s[1] === 2 && s[2] === 31 && s[3] === `'=IMPORTXML("x")`; }), JSON.stringify(sets));
+  check("only formula cells are touched", sets.length === 2, String(sets.length));
+  check("one audit line, after the writes, and the lock is released last",
+    kinds.filter(function (k) { return k === 'log'; }).length === 1 && kinds.lastIndexOf('set') < kinds.indexOf('log')
+      && kinds[kinds.length - 1] === 'release', kinds.join(','));
+  const m2 = runMig(MIG, false, grid);
+  check("⚠️ a failed sheet copy writes NOTHING", !m2.ev.some(function (e) { return e[0] === 'set'; }) && /^THREW/.test(m2.ret), m2.ret);
+  const m3 = runMig(MIG, true, [new Array(48).fill(''), new Array(48).fill('')]);
+  check("with nothing to repair it takes no copy and says so",
+    !m3.ev.some(function (e) { return e[0] === 'snap'; }) && /nothing to do/.test(m3.ret), m3.ret);
+  const MIG0 = mutate(MIG, 'if (!_snapshotSheet_(sheet.getName())) {', '_snapshotSheet_(sheet.getName()); if (false) {');
+  check("  mutation: ignoring the copy's result is caught",
+    runMig(MIG0, false, grid).ev.some(function (e) { return e[0] === 'set'; }), "");
+  check("the repair writes through both guards",
+    /_cellSafeRow_\(_shinseiForceText_\(one\)\)/.test(MIG), "");
+
+  check("the diagnostic is read-only and never creates a backup file",
+    (function (d) { return d && !/setValue|appendRow|deleteRow|insertSheet|_getBackupSpreadsheet_|_snapshotSheet_/.test(d); })(fn13(SRC, 'diagnoseShinseiFormulaCells')),
+    "it runs on production before anything else; it must change nothing");
+}
+
+console.log("\n14. ⚠️ the CEFR tooltip states exactly what the document states");
+{
+  // WHY. The ⓘ beside field 33 lists each 課程's placement score → CEFR rule. Those thresholds
+  // otherwise exist only as PROSE inside _shinseiBuildDocHtml_ (「30点以上をA1相当、60点以上をA2相当
+  // の基準」), so the tooltip's table is a second copy — the drift this codebase keeps recording.
+  // This binds the copy to the document: for every course the REAL builder runs, and every
+  // 「N点以上を<level>相当」 in its placement text must equal that course's row, in both directions.
+  const vm14 = require('vm');
+  const JS14 = (HTML.match(/<script>([\s\S]*?)<\/script>/g) || [])[1] || '';
+  const at14 = JS14.indexOf('const SHINSEI_PLACEMENT_CEFR = [');
+  const tableSrc = at14 === -1 ? '' : JS14.slice(at14, JS14.indexOf('];', at14) + 2);
+  // Evaluated from the SOURCE, never transcribed: a transcription tests the copy (cellsafe §8).
+  const table = function (src) {
+    const c = vm14.createContext({});
+    vm14.runInContext(src.replace('const SHINSEI_PLACEMENT_CEFR', 'var SHINSEI_PLACEMENT_CEFR'), c);
+    return c.SHINSEI_PLACEMENT_CEFR || [];
+  };
+  const T = table(tableSrc);
+  check("the table was found and evaluates", T.length >= 6, "an empty table makes every check below vacuous");
+
+  // Courses: the 課程 select, both ways — minus a NAMED omission.
+  // ⚠️ 進学1年課程 was taken off the tooltip on 2026-09-18 because the school expects to retire it; it
+  // is still offered in 課程 and still handled by the builder. Listed here BY NAME, so the coverage
+  // check stays strict: dropping any other course still fails, and re-adding this one means
+  // deleting it from this list as well.
+  const OMITTED_FROM_TIP = ['進学1年課程'];
+  const optM = HTML.match(/\{ id: 2, label: "課程", type: "select", options: \[([^\]]*)\] \}/);
+  const opts = optM ? optM[1].split(',').map(function (s) { return s.trim().replace(/^"|"$/g, ''); }).filter(Boolean) : [];
+  check("every course the 課程 select offers has a row, except the named omission",
+    opts.length >= 7 && opts.every(function (o) {
+      return OMITTED_FROM_TIP.indexOf(o) !== -1 || T.some(function (r) { return r.course === o; });
+    }), JSON.stringify(opts));
+  check("...and the omitted course really is absent from the tooltip",
+    OMITTED_FROM_TIP.every(function (c) { return !T.some(function (r) { return r.course === c; }); }), "");
+  check("...while it is still offered in 課程 (the tooltip omits it; the form does not)",
+    OMITTED_FROM_TIP.every(function (c) { return opts.indexOf(c) !== -1; }),
+    "if the course has left the select, drop it from OMITTED_FROM_TIP too");
+  check("...and no row names a course the form does not offer",
+    T.every(function (r) { return opts.indexOf(r.course) !== -1; }), "");
+
+  // The binding: the REAL builder, per course.
+  const bAt = SRC.indexOf('\nfunction _shinseiBuildDocHtml_(');
+  const BUILDER14 = SRC.slice(bAt + 1, SRC.indexOf('\n}\n', bAt) + 2);
+  const docBands = function (course) {
+    let Tpl = null;
+    const ctx = vm14.createContext({
+      HtmlService: { createTemplateFromFile: function () { Tpl = { evaluate: function () { return { getContent: function () { return ''; } }; } }; return Tpl; } },
+      SHINSEI_FIXED_EXAMS: 2, SHINSEI_FIXED_EDUS: 3,
+    });
+    vm14.runInContext(BUILDER14, ctx);
+    const row = new Array(50).fill('');
+    row[1] = 'テスト'; row[2] = course; row[13] = '30'; row[14] = 'A1'; row[32] = '65'; row[33] = 'A1';
+    ctx._shinseiBuildDocHtml_(row, true);
+    const out = [], re = /(\d+)点以上を(A\d(?:後半)?)相当/g;
+    let m;
+    while ((m = re.exec(Tpl.placementText))) out.push(m[1] + ':' + m[2]);
+    return out.sort().join(',');
+  };
+  const tipBands = function (r) { return r ? r.bands.map(function (b) { return b.min + ':' + b.level; }).sort().join(',') : ''; };
+  const rowOf = function (tbl, c) { return tbl.filter(function (r) { return r.course === c; })[0]; };
+  T.forEach(function (r) {
+    const doc = docBands(r.course);
+    check("⚠️ " + r.course + ": the tooltip says what the document says",
+      doc !== '' && doc === tipBands(r), "document " + doc + "  /  tooltip " + tipBands(r));
+  });
+
+  // Mutations, on the SOURCE of the table.
+  const wrongMin = table(tableSrc.replace("{ min: 70, level: 'A2後半' }", "{ min: 60, level: 'A2' }"));
+  check("  mutation: a wrong threshold in the tooltip is caught",
+    tipBands(rowOf(wrongMin, '進学1年3か月課程')) !== docBands('進学1年3か月課程'), "");
+  const extra = table(tableSrc.replace(/(日本語・文化2年課程',\s*bands: \[\{ min: 30, level: 'A1' \})\]/, "$1, { min: 60, level: 'A2' }]"));
+  check("  mutation: a band the document does not state is caught",
+    tipBands(rowOf(extra, '日本語・文化2年課程')) !== docBands('日本語・文化2年課程'), tipBands(rowOf(extra, '日本語・文化2年課程')));
+
+  // The marker, and only on the placement field.
+  check("field 33 carries the help marker",
+    /\{ id: 33, label: "プレースメントテスト判定：CEFR", type: "text", help: "placementCefr" \}/.test(HTML), "");
+  check("...and the interview field (14) does not — placement test only",
+    /\{ id: 14, label: "面接判定：CEFR", type: "text" \}/.test(HTML), "");
+  check("the tip is attached by the MARKER, never by id",
+    /if \(field\.help === 'placementCefr'\) lbl\.appendChild\(shinseiPlacementTipEl\(\)\);/.test(HTML)
+      && !/field\.id === 33/.test(HTML), "the positional habit is this module's worst bug class");
+  check("⚠️ it opens on focus as well as hover, so a tap and the Tab key reach it",
+    /\.shinsei-tip:hover \.shinsei-tip-panel, \.shinsei-tip:focus-within \.shinsei-tip-panel \{ display: block; \}/.test(HTML), "");
+  check("the trigger is a real button, described by the panel",
+    /<button type="button" class="shinsei-tip-btn"[^>]*aria-describedby=/.test(JS14) && /role="tooltip"/.test(JS14), "");
+  // ⚠️ MEASURED: anchored to the icon, the panel opened at x = −75 on a 390px phone, clipping every
+  // course name, and off-LEFT content never extends scrollWidth, so nothing else reports it. After the
+  // clamp it sits at 8–329px and clears the bottom bar. Both halves are pinned; losing either is
+  // invisible on a desktop.
+  const OPEN = JS14.slice(JS14.indexOf('function shinseiTipOpen('), JS14.indexOf('\n      }\n', JS14.indexOf('function shinseiTipOpen(')));
+  check("⚠️ the panel is clamped into the viewport horizontally on open",
+    OPEN.indexOf("if (r.left < pad) panel.style.right = (r.left - pad) + 'px';") !== -1, OPEN.slice(0, 200));
+  check("...it resets before measuring, so a previous correction never compounds",
+    OPEN.indexOf("panel.style.right = '';") !== -1 && OPEN.indexOf("panel.style.right = '';") < OPEN.indexOf('getBoundingClientRect'), "");
+  check("...and opens upward when the phone's fixed bottom bar would cover it",
+    /panel\.classList\.add\('up'\)/.test(OPEN) && /\.shinsei-tip-panel\.up \{ top: auto; bottom: calc\(100% \+ 6px\); \}/.test(HTML), "");
+}
+
+console.log("\n15. 試験名 — ONE list, the official 13, and the rename map that moved the old ones");
+{
+  // ⚠️ Until 2026-09-18 fields 3 (1回目) and 8 (2回目) held two hand-written copies of the option
+  // list with NOTHING asserting they matched. Adding an exam to one gave 1回目 an option that 2回目
+  // — and every added block, which derives from field 8 — did not have, on the same form. That is
+  // the second-copy-of-a-decision shape this codebase keeps recording.
+  const vm15 = require('vm');
+  const JS15 = (HTML.match(/<script>([\s\S]*?)<\/script>/g) || [])[1] || '';
+  const at15 = JS15.indexOf('const SHINSEI_EXAMS = [');
+  const examSrc = at15 === -1 ? '' : JS15.slice(at15, JS15.indexOf('];', at15) + 2);
+  // Evaluated from the SOURCE, never transcribed — a transcription tests the copy (cellsafe §8).
+  const evalExams = function (src) {
+    const c = vm15.createContext({});
+    vm15.runInContext(src.replace('const SHINSEI_EXAMS', 'var SHINSEI_EXAMS'), c);
+    return c.SHINSEI_EXAMS || [];
+  };
+  const E = evalExams(examSrc);
+  const names = E.map(function (e) { return e.name; });
+  check("the list was found and evaluates", E.length >= 13, "an empty list makes every check below vacuous");
+
+  // ── the ONE-list guard ────────────────────────────────────────────────────────────────────
+  check("⚠️ field 3 reads the shared constant, not a literal array",
+    /\{ id: 3, label: "試験名", type: "select", options: SHINSEI_EXAM_OPTIONS \}/.test(HTML), "");
+  check("⚠️ field 8 reads the SAME constant",
+    /\{ id: 8, label: "試験名 2回目", type: "select", toggleClass: "shinsei-exam-second", options: SHINSEI_EXAM_OPTIONS \}/.test(HTML), "");
+  check("...and no 試験名 field carries an inline option list any more",
+    !/label: "試験名[^"]*", type: "select", [^\n]*options: \[/.test(HTML),
+    "two hand-written copies is exactly what this section exists to prevent");
+  check("the options are DERIVED from the list, with the blank first",
+    /const SHINSEI_EXAM_OPTIONS = \[''\]\.concat\(SHINSEI_EXAMS\.map\(/.test(JS15),
+    "the blank option is required: 試験名 is optional, and a <select> falls back to option 0 silently");
+  // ⚠️ Declared ABOVE shinseiFormGroups or the form is read in the temporal dead zone at load
+  // (rule 3) and the whole tab is blank with no message.
+  check("⚠️ SHINSEI_EXAMS is declared above shinseiFormGroups (rule 3)",
+    at15 !== -1 && at15 < JS15.indexOf('const shinseiFormGroups = ['), "");
+
+  // ── the official list ─────────────────────────────────────────────────────────────────────
+  // Source: 出入国在留管理庁「日本語教育機関への入学をお考えのみなさまへ」 — 2 tests that prove
+  // A1相当以上, and 11 accepted 当面の間. Pinned by COUNT and by TIER, not name by name: the names
+  // are the thing under test, so restating them here would just be a third copy.
+  check("13 tests, which is what the notice lists", E.length === 13, String(E.length));
+  check("...2 of them prove A1相当以上",
+    E.filter(function (e) { return e.tier === 'proof'; }).length === 2, "");
+  check("...and 11 are accepted 当面の間",
+    E.filter(function (e) { return e.tier === 'deemed'; }).length === 11, "");
+  check("every test states the minimum it must reach — that is the whole point of the ⓘ",
+    E.every(function (e) { return typeof e.min === 'string' && e.min.trim() !== ''; }),
+    JSON.stringify(E.filter(function (e) { return !e.min; })));
+  check("no duplicate name", new Set(names).size === names.length, "");
+  // ⚠️ JPT's official name IS 日本語能力試験, the same as JLPT's. Written 正式名称（略称） the two
+  // options would differ by ONE character in the same dropdown, on a form sent to immigration.
+  check("⚠️ JPT keeps the notice's own spelling, so it cannot be mistaken for JLPT",
+    names.indexOf('JPT日本語能力試験') !== -1 && names.indexOf('日本語能力試験（JPT）') === -1,
+    JSON.stringify(names.filter(function (n) { return n.indexOf('JPT') !== -1; })));
+  check("...and JLPT is still the exact string it always was (no record was stranded by it)",
+    names.indexOf('日本語能力試験（JLPT）') !== -1, "");
+
+  // ── the rename map, across BOTH files ─────────────────────────────────────────────────────
+  const rAt = SRC.indexOf('const SHINSEI_EXAM_RENAMES = {');
+  const renameSrc = rAt === -1 ? '' : SRC.slice(rAt, SRC.indexOf('};', rAt) + 2);
+  const evalRenames = function (src) {
+    const c = vm15.createContext({});
+    vm15.runInContext(src.replace('const SHINSEI_EXAM_RENAMES', 'var SHINSEI_EXAM_RENAMES'), c);
+    return c.SHINSEI_EXAM_RENAMES || {};
+  };
+  const R = evalRenames(renameSrc);
+  check("the rename map was found and evaluates", Object.keys(R).length >= 7, String(Object.keys(R).length));
+  // ⚠️ THE BINDING, and the reason this check spans two files: the migration writes these values
+  // into Shinsei_Data. A value that is not an option leaves the record flagged red exactly as
+  // before, so the migration would have rewritten the sheet for nothing.
+  check("⚠️ every NEW name the migration writes is really an option in the form",
+    Object.keys(R).every(function (k) { return names.indexOf(R[k]) !== -1; }),
+    JSON.stringify(Object.keys(R).filter(function (k) { return names.indexOf(R[k]) === -1; })));
+  check("...and no OLD name is still offered (a rename that kept both would be two live spellings)",
+    Object.keys(R).every(function (k) { return names.indexOf(k) === -1; }),
+    JSON.stringify(Object.keys(R).filter(function (k) { return names.indexOf(k) !== -1; })));
+  check("the migration covers the extras blob too, not just the two fixed columns",
+    /const SHINSEI_EXAM_NAME_COLS = \[3, 8\];/.test(SRC)
+      && /parsed\.exams[\s\S]{0,200}?SHINSEI_EXAM_RENAMES/.test(SRC),
+    "3回目以降 blocks live in column 48 and are the half nobody scrolls down to");
+  check("⚠️ the migration refuses to write when the sheet copy failed",
+    /function migrateShinseiExamNames\(\)[\s\S]*?if \(!_snapshotSheet_\(sheet\.getName\(\)\)\) \{[\s\S]{0,200}?throw new Error/.test(SRC), "");
+  check("...and the diagnostic is read-only",
+    !/function diagnoseShinseiExamNames\(\)[\s\S]*?(setValue|appendRow|deleteRow)[\s\S]*?\n\}/.test(
+      SRC.slice(SRC.indexOf('function diagnoseShinseiExamNames()'), SRC.indexOf('function migrateShinseiExamNames()'))), "");
+  check("both are editor-run behind the maintenance unlock",
+    /function diagnoseShinseiExamNames\(\) \{\s*\n\s*_requireMaintenanceUnlock_\("diagnoseShinseiExamNames"\);/.test(SRC)
+      && /function migrateShinseiExamNames\(\) \{\s*\n\s*_requireMaintenanceUnlock_\("migrateShinseiExamNames"\);/.test(SRC), "");
+
+  // ── the ⓘ on 級又は点数 ───────────────────────────────────────────────────────────────────
+  check("級又は点数 stays FREE TEXT — the minimums are 点 / 級 / JCT5 / 初級A / C-",
+    /\{ id: 4, label: "級又は点数", type: "text", help: "examScore", helpSrc: "scol3" \}/.test(HTML)
+      && /\{ id: 9, label: "級又は点数 2回目", type: "text", toggleClass: "shinsei-exam-second", help: "examScore", helpSrc: "scol8" \}/.test(HTML), "");
+  check("the tip is attached by the MARKER, never by id",
+    /else if \(field\.help === 'examScore'\) lbl\.appendChild\(shinseiExamTipEl\(field\.helpSrc\)\);/.test(HTML)
+      && !/field\.id === 4\b/.test(HTML), "");
+  // ⚠️ Without this the ⓘ reached 1回目 and 2回目 but no ADDED block — i.e. exactly the blocks
+  // whose exam the person filling the form is least sure about.
+  check("⚠️ `help` travels to added blocks through shinseiExtraSpecs",
+    /return \{ label: String\(f\.label\)\.replace\(\/\\s\*\\d\+回目\$\/, ''\), type: f\.type, options: f\.options, help: f\.help \};/.test(JS15)
+      && /shinseiCreateFieldEl\(\{ id: 0, label: sp\.label, type: sp\.type, options: sp\.options, help: sp\.help \}\)/.test(JS15), "");
+
+  // ⚠️ THE ONE THAT MATTERS: an added block must highlight ITS OWN 試験名. shinseiAddExtraBlock
+  // tags the element with data-xblk/data-xid AFTER shinseiCreateFieldEl returns it, so a tip that
+  // captured its source when BUILT would find nothing and silently fall back to the first block's
+  // exam — the wrong answer, with nothing on screen saying so.
+  const SRCVAL = JS15.slice(JS15.indexOf('function shinseiTipSourceValue('),
+    JS15.indexOf('\n      }\n', JS15.indexOf('function shinseiTipSourceValue(')));
+  check("⚠️ the highlight source is resolved at OPEN time, from the block the field is in",
+    /data-xid/.test(SRCVAL) && /data-xkey/.test(SRCVAL) && /closest\('\.shinsei-form-group'\)/.test(SRCVAL),
+    SRCVAL.slice(0, 200));
+  check("...falling back to the named fixed control when the field is not in an added block",
+    /data-tipsrc/.test(SRCVAL) && /form\.elements\[src\]/.test(SRCVAL), "");
+  check("⚠️ both tips share ONE measurement path (a second copy drifts — the _calCellState lesson)",
+    (JS15.match(/function shinseiTipOpen\(/g) || []).length === 1
+      && /wrap\.getAttribute\('data-tipkey'\)/.test(JS15), "");
+  // ⚠️ The exam tip sets its id on the NODE, not in the markup string: domrefs.test reads any
+  // id="x" in Index.html as a real element, so a second tip emitting the same literal fails as a
+  // duplicate id. The accessibility wiring still has to be there, hence this check.
+  check("the exam tip is keyboard- and screen-reader-wired without writing an id into the markup",
+    /wrap\.querySelector\('\.shinsei-tip-panel'\)\.id = id;/.test(JS15)
+      && /wrap\.querySelector\('\.shinsei-tip-btn'\)\.setAttribute\('aria-describedby', id\);/.test(JS15)
+      && /<button type="button" class="shinsei-tip-btn" aria-label="試験ごとの合格基準">/.test(JS15), "");
+  check("the exam tip's own rows are keyed for that highlight",
+    /data-exam="/.test(JS15) && /wrap\.setAttribute\('data-tipkey', 'exam'\)/.test(JS15), "");
+  // ⚠️ 13 long official names, not 6 short course names: the shared 320px + nowrap ran the table
+  // straight out of the panel. Scoped by data-tipkey so the CEFR tip keeps the size it was
+  // measured at.
+  check("the exam panel is widened and allowed to wrap, without touching the CEFR tip",
+    /\.shinsei-tip\[data-tipkey="exam"\] \.shinsei-tip-panel \{/.test(HTML)
+      && /\.shinsei-tip\[data-tipkey="exam"\] \.shinsei-tip-panel table \{ white-space: normal; \}/.test(HTML), "");
+
+  // ⚠️ The phone has a fixed strip at the TOP as well as the bar at the bottom, and the 13-row
+  // exam panel is tall enough to reach it: measured, its heading opened BEHIND that strip, which
+  // scrolling inside the panel cannot bring back. The cap is the fix, and the WIDTH test is what
+  // keeps it mobile-only — on desktop .sb-sub.open is the sub-nav inside the left rail, and
+  // without that test it capped the desktop panel to 186px for no reason.
+  const OPEN15 = JS15.slice(JS15.indexOf('function shinseiTipOpen('),
+    JS15.indexOf('\n      }\n', JS15.indexOf('function shinseiTipOpen(')));
+  check("⚠️ the panel is capped to fit under the phone's fixed TOP strip too",
+    /const ceiling = \(subR && subR\.height > 0 &&/.test(OPEN15)
+      && /panel\.style\.maxHeight = Math\.max\(80, r\.bottom - ceiling - pad\)/.test(OPEN15), OPEN15.slice(-400));
+  check("⚠️ ...and the ceiling is mobile-only, by WIDTH (the desktop rail is not a top strip)",
+    /subR\.width >= window\.innerWidth \* 0\.8/.test(OPEN15),
+    "without this the desktop panel is capped against the sidebar's sub-nav");
+  check("...the cap is reset before measuring, like the horizontal clamp",
+    OPEN15.indexOf("panel.style.maxHeight = '';") !== -1
+      && OPEN15.indexOf("panel.style.maxHeight = '';") < OPEN15.indexOf('getBoundingClientRect'), "");
+
+  // ── mutations ─────────────────────────────────────────────────────────────────────────────
+  const dropped = evalExams(examSrc.replace(/\n\s*\{ name: '日本語オンラインテスト（JOT）'[^\n]*\n/, '\n'));
+  check("  mutation: dropping a test from the list is caught", dropped.length !== 13, String(dropped.length));
+  const noMin = evalExams(examSrc.replace("min: 'JT5以上'", "min: ''"));
+  check("  mutation: a test with no stated minimum is caught",
+    !noMin.every(function (e) { return typeof e.min === 'string' && e.min.trim() !== ''; }), "");
+  const jptClash = evalExams(examSrc.replace("name: 'JPT日本語能力試験'", "name: '日本語能力試験（JPT）'"));
+  check("  mutation: JPT written so it collides with JLPT is caught",
+    jptClash.map(function (e) { return e.name; }).indexOf('JPT日本語能力試験') === -1, "");
+  const staleRename = evalRenames(renameSrc.replace('"JPT日本語能力試験"', '"JPT"'));
+  check("  mutation: a rename pointing at a name the form does not offer is caught",
+    !Object.keys(staleRename).every(function (k) { return names.indexOf(staleRename[k]) !== -1; }), "");
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

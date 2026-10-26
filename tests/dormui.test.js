@@ -57,7 +57,11 @@ console.log("\n1. one palette: no accent colour left inline on a 寮管理 butto
     /#view-dorms #btnDocDelete, #view-dorms #btnSchedDelTpl \{\s*background: transparent; color: var\(--alert-danger-text\);\s*box-shadow: inset 0 0 0 1px/.test(block(HTML)), "");
   guard("⚠️ a disabled button LOOKS disabled (.export-btn had no :disabled style at all)",
     function (h) { return /#view-dorms \.export-btn:disabled, #view-dorms \.schedule-btn:disabled \{\s*opacity: 0\.45;/.test(block(h)); },
-    'opacity: 0.45; cursor: not-allowed; filter: none;', 'cursor: not-allowed; filter: none;',
+    // ⚠️ The anchor carries 寮管理's own selector: シミュレーション's disabled ＋入学期を追加 uses the
+    // same declaration line since 2026-09-16, so the bare text matched twice and the mutation was
+    // refused. Anchor on the rule this check is about, not on a declaration anyone may reuse.
+    '#view-dorms .export-btn:disabled, #view-dorms .schedule-btn:disabled {\n        opacity: 0.45;',
+    '#view-dorms .export-btn:disabled, #view-dorms .schedule-btn:disabled {\n        opacity: 1;',
     "名前変更 / 削除 start disabled until a file is chosen and looked fully clickable");
   // ⚠️ Reported: the building-row buttons had no visible hover — the shared brightness(0.9) on a
   // light tint over a light header. Measured with the driver's real-mouse --hover: rgb(90,103,216).
@@ -103,9 +107,12 @@ console.log("\n4. ↑ ↓ ✕ are buttons: a keyboard can reach them");
     function (h) { return !/<span[^>]*onclick="sched\w+\(/.test(js(h)); },
     `<button type="button" class="sx-btn sx-del" title="この日程を削除" onclick="schedDeleteBlock(' + i + ')">✕</button>`,
     `<span style="cursor:pointer; color:#e74a3b;" title="この日程を削除" onclick="schedDeleteBlock(' + i + ')">✕</span>`);
-  check("11 sx-btn controls, every one with a title",
-    (js(HTML).match(/<button type="button" class="sx-btn[^"]*"[^>]*title="[^"]+"/g) || []).length === 11 &&
-    (js(HTML).match(/class="sx-btn/g) || []).length === 11, "");
+  // ⚠️ RE-PINNED 11 → 12 on 2026-09-16, not loosened: シミュレーション's per-intake ✕ became the
+  // twelfth .sx-btn when it stopped being a <span onclick>. The count is the point — it is what
+  // stops one of these quietly reverting to a span — so it moves only when a real control is added.
+  check("12 sx-btn controls, every one with a title",
+    (js(HTML).match(/<button type="button" class="sx-btn[^"]*"[^>]*title="[^"]+"/g) || []).length === 12 &&
+    (js(HTML).match(/class="sx-btn/g) || []).length === 12, "");
   check("the handlers are unchanged (schedule.test pins them)",
     /onclick="schedMoveItem\(' \+ i \+ ',' \+ j \+ ',-1\)"/.test(js(HTML)) && /onclick="schedDeleteItem\(' \+ i \+ ',' \+ j \+ '\)"/.test(js(HTML)), "");
 }

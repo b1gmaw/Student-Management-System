@@ -1,190 +1,212 @@
-// The guard layer: role and permissions come from the resolved session, not from
-// what the browser sent. Measured against production before this change:
+// The guard layer: role and permissions come from the resolved session, never from what the browser
+// sent. Measured in production before this layer existed:
 //   google.script.run.getDashboardData("teacher", false)  →  608 student records
 //
-// The design keeps every signature intact — role sits in argument 1, 3 or 4
-// depending on the function — and instead makes the five guard helpers ignore
-// what they were passed. That fixes ~93 call sites without touching one, but it
-// creates two traps this suite exists to pin down:
+// ⚠️ REWRITTEN 2026-09-21 to run the REAL helpers from Code.js in a vm. The previous version was a pure
+// transcription with no binding to the source, and it proved the point CLAUDE.md makes about
+// cellsafe §8: when observe mode was deleted from Code.js, it still passed all 29 of its checks —
+// including "observe mode changes nothing" — against code that no longer had an observe mode, and its
+// hasPerm had never gained the admin-level rule the real _hasPerm_ has carried since 2026-09-07.
+// A transcription tests the copy.
 //
-//   §4  a role that describes SOMEBODY ELSE (the user being saved, the row being
-//       resolved) must still be read literally, or master login breaks and an
-//       admin can grant the master role;
-//   §5  observe mode must not change behaviour, or turning it on is the outage
-//       it exists to prevent.
+//   §1  the argument is ignored — the session decides, in both directions
+//   §2  no session denies everything, and _requireSession_ throws the session-dead error
+//   §3  _roleIsAnyOf_ keeps the comparison inside the session-aware helper
+//   §4  identity checks (a role describing SOMEBODY ELSE) stay literal
+//   §5  there is NO mode switch — the observe mode that failed open is gone for good
+//   §6  every ambiguous state denies
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const ROOT = path.join(__dirname, '..');
+const SRC = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8');
+const SHINSEI = fs.readFileSync(path.join(ROOT, 'Shinsei_Code.js'), 'utf8');
 
 let pass = 0, fail = 0;
 function check(n, c, d) {
   if (c) { pass++; console.log("  PASS  " + n); }
-  else { fail++; console.log("  FAIL  " + n + "\n        " + d); }
+  else { fail++; console.log("  FAIL  " + n + "\n        " + (d || "")); }
+}
+// A crash must read as a verdict, not a stack trace: running this suite against the pre-2026-09-21
+// Code.js dies inside the first behavioural call (its helpers call the deleted _authEnforcing_).
+process.on('uncaughtException', function (e) {
+  fail++; console.log("  FAIL  the suite crashed — the helpers depend on something that should not exist\n        " + e.message);
+  console.log("\n" + pass + " passed, " + fail + " FAILED"); process.exit(1);
+});
+
+// A top-level function's source: a one-liner, or everything up to its column-0 closing brace.
+function fnSrc(src, name) {
+  const i = src.indexOf('\nfunction ' + name + '(');
+  if (i < 0) return '';
+  const start = i + 1, eol = src.indexOf('\n', start), first = src.slice(start, eol);
+  const opens = (first.match(/\{/g) || []).length, closes = (first.match(/\}/g) || []).length;
+  if (opens > 0 && opens === closes) return first;
+  return src.slice(start, src.indexOf('\n}\n', start) + 2);
 }
 
-// ---- Transcribed from Code.js ----
-let authUser = null;
-let enforcing = false;
-let mismatches = [];
+const HELPERS = ['_sessionDeadError_', '_requireSession_', '_effectiveRole_', '_effectivePerms_',
+  '_isAdminRole_', '_isAdminLevel_', '_isMasterRole_', '_isMasterRoleLiteral_', '_roleIsAnyOf_', '_hasPerm_'];
+// _isAdminLevel_ reads a role's own 管理者権限 flag through _roleByKey_ (which reads the Roles sheet).
+const ROLE_DEFS = { teacher: { admin: false }, sales: { admin: false }, admin: { admin: true }, kyomu_mgr: { admin: true } };
 
-function effectiveRole(claimed) {
-  if (enforcing) return authUser ? String(authUser.role || "") : "";
-  if (authUser && String(authUser.role || "") !== String(claimed || "")) {
-    mismatches.push(String(claimed));
-  }
-  return String(claimed || "");
+// ⚠️ PropertiesService THROWS here. If any helper consulted a script property — a mode switch — the
+// call would throw instead of answering, so every behavioural check below doubles as proof that
+// none does. That is the failure that used to fail OPEN.
+function load(src) {
+  const ctx = vm.createContext({
+    _authUser: null,
+    _roleByKey_: function (k) { return ROLE_DEFS[String(k || '')] || null; },
+    PropertiesService: { getScriptProperties: function () { throw new Error('script properties unavailable'); } },
+  });
+  HELPERS.forEach(function (n) {
+    const s = fnSrc(src, n);
+    if (!s) throw new Error('helper not found in Code.js: ' + n);
+    vm.runInContext(s, ctx);
+  });
+  return ctx;
 }
-function effectivePerms(claimed) {
-  if (enforcing) return authUser ? authUser.permissions : "";
-  return claimed;
-}
-function isMasterRole(role) { return effectiveRole(role) === "master"; }
-function isMasterRoleLiteral(role) { return String(role || "") === "master"; }
-function isAdminRole(role) {
-  const r = effectiveRole(role);
-  return r === "admin" || r === "master";
-}
-function hasPerm(role, perms, needed) {
-  if (isMasterRole(role)) return true;
-  const p = effectivePerms(perms);
-  if (!p) return false;
-  const list = Array.isArray(p) ? p : String(p).split(",").map(s => s.trim());
-  return list.indexOf(needed) !== -1;
-}
-function roleIsAnyOf(role, allowed) {
-  const r = effectiveRole(role);
-  if (r === "master" || r === "admin") return true;
-  return allowed.indexOf(r) !== -1;
-}
-function requireSession(what) {
-  if (authUser) return authUser;
-  if (!enforcing) { mismatches.push("(no role argument)"); return null; }
-  throw new Error("セッションがありません。再度ログインしてください。");
-}
+const C = load(SRC);
+function as(ctx, user, fn) { ctx._authUser = user; try { return fn(ctx); } finally { ctx._authUser = null; } }
+function threwDead(ctx, fn) { try { fn(); return 'no throw'; } catch (e) { return e.sessionDead === true && /再度ログインしてください/.test(e.message) ? 'dead' : 'other: ' + e.message; } }
 
-function as(user, enforce, fn) {
-  authUser = user; enforcing = enforce; mismatches = [];
-  try { return fn(); } finally { authUser = null; enforcing = false; }
-}
 const TEACHER = { role: "teacher", id: "T1", name: "甲野", permissions: "view_teacher_schedule" };
 const SALES   = { role: "sales",   id: "S1", name: "乙山", permissions: "view_admissions,edit_admissions" };
 const MASTER  = { role: "master",  id: "MASTER", name: "システム", permissions: "ALL" };
 
-console.log("\n1. enforcing: the argument is ignored");
+console.log("\n0. no mode switch exists (structural — first, so it reports even if behaviour below crashes)");
 {
-  // THE attack, verbatim. A teacher session claiming to be master.
-  as(TEACHER, true, function () {
-    check("a teacher claiming master is not master", !isMasterRole("master"), "privilege escalation by argument");
-    check("a teacher claiming admin is not admin", !isAdminRole("admin"), "privilege escalation by argument");
-    check("claimed permissions are ignored", !hasPerm("master", "ALL", "view_students"),
-      "the browser sent perms:'ALL' and was believed");
-    check("the session's own permission still works", hasPerm("teacher", "", "view_teacher_schedule"),
-      "a real permission must survive being ignored");
-  });
-  as(MASTER, true, function () {
-    check("a real master IS master even claiming teacher", isMasterRole("teacher"),
-      "the session decides, in both directions");
-    check("master passes any permission", hasPerm("teacher", "", "anything_at_all"), "");
+  // Removed 2026-09-21. It failed OPEN: an unreadable AUTH_ENFORCE property meant "observe", and observe
+  // trusted the role the browser sent. Checked on CODE lines only — the history in comments is wanted.
+  const codeLines = function (s) { return s.split('\n').filter(function (l) { return !/^\s*(\/\/|\*|\/\*)/.test(l); }).join('\n'); };
+  const both = codeLines(SRC) + '\n' + codeLines(SHINSEI);
+  ['AUTH_ENFORCE', '_authEnforcing_', '_authMismatch_', '_currentMethod'].forEach(function (t) {
+    check("no code reads or sets " + t, both.indexOf(t) === -1, "a mode switch is back: " + t);
   });
 }
 
-console.log("\n2. no session, enforcing");
-{
-  // An anonymous caller: no token, so nothing is parked.
-  as(null, true, function () {
-    check("no session is not master", !isMasterRole("master"), "anonymous caller reached master");
-    check("no session is not admin", !isAdminRole("admin"), "anonymous caller reached admin");
-    check("no session holds no permission", !hasPerm("admin", "ALL", "view_students"),
-      "this is the getDashboardData('teacher') hole");
-    check("no session is not sales", !roleIsAnyOf("sales", ["sales"]), "");
-    let threw = false;
-    try { requireSession("getSchedule"); } catch (e) { threw = true; }
-    check("_requireSession_ throws with no session", threw, "endpoints with no role argument must refuse");
-  });
-}
+console.log("\n0b. the real helpers were loaded");
+check("all " + HELPERS.length + " helpers extracted from Code.js and evaluated", HELPERS.every(function (n) { return typeof C[n] === 'function'; }), "");
 
-console.log("\n3. _roleIsAnyOf_ replaces the half-fixed inline check");
+console.log("\n1. the argument is ignored — the session decides");
+as(C, TEACHER, function (c) {
+  // THE attack, verbatim: a teacher session claiming to be master.
+  check("a teacher claiming master is not master", !c._isMasterRole_("master"), "privilege escalation by argument");
+  check("a teacher claiming admin is not admin", !c._isAdminRole_("admin"), "privilege escalation by argument");
+  check("claimed permissions are ignored", !c._hasPerm_("master", "ALL", "view_students"), "the browser sent perms:'ALL' and was believed");
+  check("the session's own permission still works", c._hasPerm_("teacher", "", "view_teacher_schedule"), "");
+});
+as(C, MASTER, function (c) {
+  check("a real master IS master even claiming teacher", c._isMasterRole_("teacher"), "the session decides, in both directions");
+  check("master passes any permission", c._hasPerm_("teacher", "", "anything_at_all"), "");
+});
+// The rule the old transcription never had: 管理者権限 overrides the ticks, from the person or the role.
+as(C, { role: "teacher", id: "T2", name: "管理教務", permissions: "", adminUser: true }, function (c) {
+  check("a person flagged 管理者権限 holds every permission", c._hasPerm_("", "", "view_students"), "_hasPerm_ must consult _isAdminLevel_");
+});
+as(C, { role: "kyomu_mgr", id: "S9", name: "教務部長", permissions: "" }, function (c) {
+  check("so does a custom role flagged admin-level", c._hasPerm_("", "", "view_students"), "");
+});
+as(C, SALES, function (c) {
+  check("an unflagged sales session holds only what is ticked", !c._hasPerm_("", "", "view_students") && c._hasPerm_("", "", "view_admissions"), "");
+});
+
+console.log("\n2. no session denies everything");
+as(C, null, function (c) {
+  check("no session is not master", !c._isMasterRole_("master"), "anonymous caller reached master");
+  check("no session is not admin", !c._isAdminRole_("admin") && !c._isAdminLevel_("admin"), "anonymous caller reached admin");
+  check("no session holds no permission", !c._hasPerm_("admin", "ALL", "view_students"), "this is the getDashboardData('teacher') hole");
+  check("no session is not sales", !c._roleIsAnyOf_("sales", ["sales"]), "");
+  check("_requireSession_ throws the session-dead error", threwDead(c, function () { c._requireSession_("getSchedule"); }) === 'dead',
+    "endpoints with no role argument must refuse, and the error must sign the browser out");
+});
+
+console.log("\n3. _roleIsAnyOf_ keeps the comparison inside the session-aware helper");
 {
-  // The old shape was:  !_isAdminRole_(userRole) && userRole !== "sales"
-  // _isAdminRole_ consulted the session, but the comparison beside it read the
-  // client's string — so passing "sales" walked straight through.
-  const oldShape = function (claimed) { return isAdminRole(claimed) || claimed === "sales"; };
-  as(TEACHER, true, function () {
-    check("the OLD inline shape let a teacher through as sales", oldShape("sales") === true,
-      "this is why the comparison had to move into the helper");
-    check("_roleIsAnyOf_ does not", !roleIsAnyOf("sales", ["sales"]),
-      "the claimed string still reached the decision");
+  // The old inline shape was:  _isAdminRole_(userRole) || userRole === "sales" — the half beside the
+  // helper read the client's string, so passing "sales" walked straight through.
+  as(C, TEACHER, function (c) {
+    const oldShape = function (claimed) { return c._isAdminRole_(claimed) || claimed === "sales"; };
+    check("the OLD inline shape let a teacher through as sales", oldShape("sales") === true, "why the comparison moved into the helper");
+    check("_roleIsAnyOf_ does not", !c._roleIsAnyOf_("sales", ["sales"]), "the claimed string still reached the decision");
   });
-  as(SALES, true, function () {
-    check("a real sales session passes", roleIsAnyOf("anything", ["sales"]), "");
-    check("sales is refused a teacher-only endpoint",
-      !roleIsAnyOf("x", ["teacher"]), "");
+  as(C, SALES, function (c) {
+    check("a real sales session passes", c._roleIsAnyOf_("anything", ["sales"]), "");
+    check("sales is refused a teacher-only endpoint", !c._roleIsAnyOf_("x", ["teacher"]), "");
   });
-  as(MASTER, true, function () {
-    check("master passes regardless of the allowed list", roleIsAnyOf("x", ["teacher"]),
-      "master bypasses every check, as everywhere else");
+  as(C, MASTER, function (c) {
+    check("master passes regardless of the allowed list", c._roleIsAnyOf_("x", ["teacher"]), "");
   });
 }
 
 console.log("\n4. identity checks must stay literal");
 {
-  // _resolveUserById_ runs INSIDE resumeSession, before any session is parked.
-  // With the session-aware helper it returns false for the master row, the
-  // lookup falls through to Staff_Master, finds nothing, and every master
-  // session is revoked on resume.
-  as(null, true, function () {
-    check("the master row resolves with no session parked", isMasterRoleLiteral("master"),
-      "master login would break entirely");
-    check("the session-aware helper would NOT have", !isMasterRole("master"),
-      "this is the difference the literal version exists for");
+  // _resolveUserById_ runs INSIDE resumeSession, before any session is parked: the session-aware
+  // helper would say "not master" for the master row and revoke every master session on resume.
+  as(C, null, function (c) {
+    check("the master row resolves with no session parked", c._isMasterRoleLiteral_("master"), "master login would break entirely");
+    check("the session-aware helper would NOT have", !c._isMasterRole_("master"), "this is why the literal version exists");
   });
-  // saveSystemUser asks "is the role being ASSIGNED master". The session-aware
-  // version reads the CALLER instead, so an admin assigning role=master to
-  // somebody would sail past the check.
-  as({ role: "admin", id: "A1", name: "管理", permissions: "manage_users" }, true, function () {
-    check("assigning role=master is caught", isMasterRoleLiteral("master"),
-      "an admin could grant somebody the master role");
-    check("the session-aware helper would have missed it", !isMasterRole("master"),
-      "it would have compared the caller's role, not the assigned one");
+  // saveSystemUser asks "is the role being ASSIGNED master" — about somebody else.
+  as(C, { role: "admin", id: "A1", name: "管理", permissions: "manage_users" }, function (c) {
+    check("assigning role=master is caught", c._isMasterRoleLiteral_("master"), "an admin could grant somebody the master role");
+    check("the session-aware helper would have missed it", !c._isMasterRole_("master"), "it compares the caller, not the assigned role");
   });
 }
 
-console.log("\n5. observe mode changes nothing, and says so");
+console.log("\n5. there is NO mode switch");
 {
-  // The whole point: behaviour identical to before, disagreements recorded.
-  as(TEACHER, false, function () {
-    check("observing, a claimed role is still believed", isMasterRole("master"),
-      "observe mode must not change behaviour — that is what makes it safe to roll out");
-    check("and the disagreement is recorded", mismatches.length > 0,
-      "a silent observe window teaches nothing");
-  });
-  as(TEACHER, false, function () {
-    isMasterRole("teacher");
-    check("no entry when the claim matches the session", mismatches.length === 0,
-      "normal use must not fill the log: " + JSON.stringify(mismatches));
-  });
-  as(null, false, function () {
-    check("observing, an anonymous caller still gets through", isMasterRole("master"),
-      "OBSERVE MODE CLOSES NOTHING — it measures. Only the flip to AUTH_ENFORCE=1 fixes this.");
-  });
-  // Permissions follow the same rule, or a screen would break in observe mode.
-  as(TEACHER, false, function () {
-    check("observing, claimed permissions still apply", hasPerm("teacher", "view_students", "view_students"), "");
+  // Removed 2026-09-21. It failed OPEN: an unreadable AUTH_ENFORCE property meant "observe", and observe
+  // trusted the role the browser sent. Checked on CODE lines only — the history in comments is wanted.
+  // (The structural half runs first, in section 0 — see there.)
+  const rs = fnSrc(SRC, '_requireSession_');
+  check("_requireSession_ has exactly two outcomes: the session, or the session-dead error",
+    /if \(_authUser\) return _authUser;\s*\n\s*throw _sessionDeadError_\(/.test(rs) && !/return null/.test(rs), rs);
+  as(C, TEACHER, function (c) {
+    check("with script properties unreadable the guards still answer, and still deny the claim",
+      !c._isMasterRole_("master") && !c._hasPerm_("master", "ALL", "view_students"),
+      "a helper that consults a property would throw here — or, worse, fall back to the argument");
   });
 }
 
-console.log("\n6. the enforcing default is fail-closed");
-{
-  // Every ambiguous state must land on deny.
-  [null, undefined, { role: "", id: "", permissions: "" }].forEach(function (u) {
-    as(u, true, function () {
-      check("session " + JSON.stringify(u && u.role) + " grants nothing",
-        !hasPerm("master", "ALL", "view_students") && !isAdminRole("admin"),
-        "an empty or missing session must deny, never default to allow");
-    });
+console.log("\n6. every ambiguous state denies");
+[undefined, { role: "", id: "", permissions: "" }].forEach(function (u) {
+  as(C, u, function (c) {
+    check("session " + JSON.stringify(u && u.role) + " grants nothing",
+      !c._hasPerm_("master", "ALL", "view_students") && !c._isAdminRole_("admin"), "an empty or missing session must deny");
   });
-  as({ role: "teacher", id: "T", name: "x", permissions: null }, true, function () {
-    check("null permissions deny rather than throw",
-      hasPerm("teacher", "ALL", "view_students") === false, "");
-  });
+});
+as(C, { role: "teacher", id: "T", name: "x", permissions: null }, function (c) {
+  check("null permissions deny rather than throw", c._hasPerm_("teacher", "ALL", "view_students") === false, "");
+});
+
+console.log("\n7. mutations — each guard is run against the shape it exists to prevent");
+function mutant(label, from, to, predicate) {
+  if (SRC.indexOf(from) === -1) { check("  mutation: " + label, false, "anchor not found: " + from); return; }
+  let caught;
+  try { caught = predicate(load(SRC.replace(from, to))); } catch (e) { caught = true; }
+  check("  mutation: " + label, caught === true, "the old shape passed");
 }
+mutant("a claimed-role fallback in _effectiveRole_ (observe mode's hole) is caught",
+  'return _authUser ? String(_authUser.role || "") : "";',
+  'return _authUser ? String(_authUser.role || "") : String(claimedRole || "");',
+  function (m) { return as(m, null, function (c) { return c._isMasterRole_("master"); }); });
+mutant("a claimed-permissions fallback in _effectivePerms_ is caught",
+  'return _authUser ? _authUser.permissions : "";',
+  'return _authUser ? _authUser.permissions : claimedPerms;',
+  function (m) { return as(m, null, function (c) { return c._hasPerm_("x", "view_students", "view_students"); }); });
+mutant("an observe-style early return in _requireSession_ is caught",
+  '  if (_authUser) return _authUser;\n  throw _sessionDeadError_(',
+  '  if (_authUser) return _authUser;\n  if (true) return null;\n  throw _sessionDeadError_(',
+  function (m) { return as(m, null, function (c) { return threwDead(c, function () { c._requireSession_("x"); }) !== 'dead'; }); });
+mutant("a mode switch that reads a script property is caught",
+  'function _effectiveRole_(claimedRole) {\n',
+  'function _effectiveRole_(claimedRole) {\n  if (PropertiesService.getScriptProperties().getProperty("AUTH_ENFORCE") !== "1") return String(claimedRole || "");\n',
+  function (m) { return as(m, TEACHER, function (c) { return c._isMasterRole_("master"); }); });
+mutant("dropping the admin-level rule from _hasPerm_ is caught",
+  '  if (_isAdminLevel_(role)) return true;\n  const p = _effectivePerms_(perms);',
+  '  const p = _effectivePerms_(perms);',
+  function (m) { return as(m, { role: "teacher", id: "T2", permissions: "", adminUser: true }, function (c) { return !c._hasPerm_("", "", "view_students"); }); });
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));
 process.exitCode = fail === 0 ? 0 : 1;

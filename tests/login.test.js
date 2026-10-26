@@ -1,97 +1,68 @@
-// Failed-login delay, transcribed from Code.js loginUser.
+// Login brute-force limits, read from Code.js (not transcribed).
 //
-// Two things must hold: failures get slower, and the delay is CAPPED so a
-// sustained attack cannot turn the defence itself into a staff-facing outage.
-// The final section states the honest limit — the delay does NOT make a 4-digit
-// PIN safe, and says so numerically so nobody mistakes it for a fix.
+// ⚠️ Until 2026-10-26 this file transcribed an escalating GLOBAL delay (1.5s → 8s cap) and tested
+// the transcription, never the source. That design did not hold: a delay slows one request, not
+// thirty parallel ones, and every sleeping failure held one of the deployer's executions. The
+// limit is now per ACCOUNT, and tests/authz.test.js §7 runs the real loginUser against it. This
+// file pins the constants from the source and states, in numbers, what the limit does and does
+// not buy.
 
-const LOGIN_FAIL_DELAY_MS = 1500;
-const LOGIN_FAIL_WINDOW = 300;
-const LOGIN_FAIL_ESCALATE_AT = 8;
-const LOGIN_FAIL_MAX_DELAY_MS = 8000;
-
-let cache = {}, clock = 0;
-const cachePut = (k, v, ttl) => { cache[k] = { v, exp: clock + ttl }; };
-function cacheGet(k) {
-  const e = cache[k];
-  if (!e) return null;
-  if (clock >= e.exp) { delete cache[k]; return null; }
-  return e.v;
-}
-function _noteLoginFailure_() {
-  const n = (parseInt(cacheGet('loginFails') || '0', 10) || 0) + 1;
-  cachePut('loginFails', String(n), LOGIN_FAIL_WINDOW);
-  return n;
-}
-function delayFor(n) {
-  let wait = LOGIN_FAIL_DELAY_MS;
-  if (n > LOGIN_FAIL_ESCALATE_AT) {
-    wait = Math.min(LOGIN_FAIL_DELAY_MS * (1 + (n - LOGIN_FAIL_ESCALATE_AT)), LOGIN_FAIL_MAX_DELAY_MS);
-  }
-  return wait;
-}
+const fs = require('fs');
+const path = require('path');
+const SRC = fs.readFileSync(path.join(__dirname, '..', 'Code.js'), 'utf8');
+const num = function (name) {
+  const m = SRC.match(new RegExp('\\nconst ' + name + '\\s+=\\s*(\\d+)'));
+  return m ? Number(m[1]) : NaN;
+};
+const LOGIN_FAIL_DELAY_MS = num('LOGIN_FAIL_DELAY_MS');
+const LOGIN_ACCOUNT_MAX = num('LOGIN_ACCOUNT_MAX');
+const LOGIN_ACCOUNT_WINDOW = num('LOGIN_ACCOUNT_WINDOW');
 
 let pass = 0, fail = 0;
 function check(n, c, d) {
   if (c) { pass++; console.log("  PASS  " + n); }
   else { fail++; console.log("  FAIL  " + n + "\n        " + d); }
 }
-const reset = () => { cache = {}; clock = 0; };
 
-console.log("\n1. A single mistyped PIN costs one base delay");
+console.log("\n1. the limit's constants, from the source");
 {
-  reset();
-  check("first failure is 1500ms", delayFor(_noteLoginFailure_()) === 1500, String(delayFor(1)));
+  check("a per-account limit exists", LOGIN_ACCOUNT_MAX > 0 && LOGIN_ACCOUNT_WINDOW > 0,
+    LOGIN_ACCOUNT_MAX + " / " + LOGIN_ACCOUNT_WINDOW);
+  check("a typo or three never trips it", LOGIN_ACCOUNT_MAX >= 4, String(LOGIN_ACCOUNT_MAX));
+  check("a refusal lasts minutes, not hours (it can be aimed at a colleague)",
+    LOGIN_ACCOUNT_WINDOW <= 1800, LOGIN_ACCOUNT_WINDOW + "s");
 }
 
-console.log("\n2. Flat until the threshold, then escalates");
+console.log("\n2. the delay is flat and short: it no longer does the limiting");
 {
-  reset();
-  const seen = [];
-  for (let i = 0; i < 14; i++) seen.push(delayFor(_noteLoginFailure_()));
-  check("first 8 flat at 1500ms", seen.slice(0, 8).every(x => x === 1500), JSON.stringify(seen.slice(0, 8)));
-  check("then grows", seen[8] > 1500 && seen[9] > seen[8], JSON.stringify(seen.slice(8, 11)));
-  console.log("        delays: " + seen.join(", "));
+  check("one flat delay of at most 1.5s", LOGIN_FAIL_DELAY_MS > 0 && LOGIN_FAIL_DELAY_MS <= 1500, String(LOGIN_FAIL_DELAY_MS));
+  // An escalating delay is what held executions under a flood (finding 4).
+  check("⚠️ no escalation remains", !/LOGIN_FAIL_ESCALATE_AT|LOGIN_FAIL_MAX_DELAY_MS/.test(SRC), "");
 }
 
-console.log("\n3. CAPPED — the defence cannot become the outage");
+console.log("\n3. the limit sits BEFORE anything reads a sheet or a password");
 {
-  reset();
-  let worst = 0;
-  for (let i = 0; i < 5000; i++) worst = Math.max(worst, delayFor(_noteLoginFailure_()));
-  check("never exceeds the cap", worst === LOGIN_FAIL_MAX_DELAY_MS, "worst=" + worst);
+  const body = (SRC.match(/\nfunction loginUser\([\s\S]*?\n\}\n/) || [""])[0];
+  const r = body.indexOf('_reserveLoginAttempt_(id, '), s = body.indexOf('_systemPin_()'),
+        f = body.indexOf('_findAccountByEmail_(id)');
+  check("reserved first", r !== -1 && r < s && r < f, r + " / " + s + " / " + f);
 }
 
-console.log("\n4. Counter expires, so staff aren't punished for yesterday");
+console.log("\n4. honest limit: what the per-account rate buys");
 {
-  reset();
-  for (let i = 0; i < 20; i++) _noteLoginFailure_();
-  const during = delayFor(parseInt(cacheGet('loginFails'), 10));
-  clock += LOGIN_FAIL_WINDOW + 1;
-  check("escalated during the window", during > 1500, String(during));
-  check("back to base after it lapses", delayFor(_noteLoginFailure_()) === 1500, "still escalated");
-}
-
-console.log("\n5. Honest limit — this is defence in depth, NOT a fix");
-{
-  const PARALLEL = 30;                                    // GAS simultaneous-execution ceiling
-  const hours = (combos, delayMs) => (combos * (delayMs / 1000)) / PARALLEL / 3600;
-  const days = (c, d) => hours(c, d) / 24;
-  const years = (c, d) => days(c, d) / 365;
-  console.log("        4-digit  @ 8s: " + hours(1e4, 8000).toFixed(1) + " h   <- why the minimum is 8");
-  console.log("        6-digit  @ 8s: " + days(1e6, 8000).toFixed(1) + " days");
-  console.log("        8-digit  @ 8s: " + days(1e8, 8000).toFixed(0) + " days");
-  console.log("        8-char a-zA-Z0-9 @ 8s: " + years(Math.pow(62, 8), 8000).toExponential(1) + " years");
-  check("4-digit falls in well under a day even at the cap", hours(1e4, 8000) < 1,
-    "would be " + hours(1e4, 8000).toFixed(1) + "h");
-  check("6-digit buys days, not years", days(1e6, 8000) > 2 && days(1e6, 8000) < 10,
-    days(1e6, 8000).toFixed(1) + " days");
-  check("8-digit buys roughly a year, not eight", days(1e8, 8000) > 250 && days(1e8, 8000) < 400,
-    days(1e8, 8000).toFixed(0) + " days");
-  // Why setSystemPin warns when the value is numeric-only: at the same length,
-  // the alphabet matters far more than the delay ever will.
-  check("8-char alphanumeric is out of reach of online guessing",
-    years(Math.pow(62, 8), 8000) > 1e5, years(Math.pow(62, 8), 8000).toExponential(1) + " years");
+  // Parallel requests no longer help: the rate is per account, whatever the concurrency.
+  const perDay = LOGIN_ACCOUNT_MAX * (86400 / LOGIN_ACCOUNT_WINDOW);
+  const days = function (combos) { return combos / perDay; };
+  console.log("        guesses per account per day: " + perDay);
+  console.log("        top-1,000 common passwords: " + days(1000).toFixed(1) + " days per account");
+  console.log("        8-digit PIN: " + (days(1e8) / 365).toFixed(0) + " years");
+  check("one account gets at most a few hundred guesses a day", perDay <= 1000, String(perDay));
+  // ⚠️ The limit does NOT save a common password: a top-1,000 list falls in days. That is why
+  // _commonPasswordProblem_ refuses them when a password is set (2026-10-26, authz.test §10).
+  // A password set BEFORE that rule is only as safe as it was then; it applies on the next change.
+  check("a common-password list still falls within a week (stated, not hidden)", days(1000) < 7,
+    days(1000).toFixed(1) + " days");
+  check("an 8-digit PIN is out of reach", days(1e8) / 365 > 100, (days(1e8) / 365).toFixed(0) + " years");
 }
 
 console.log("\n6. setSystemPin validation");

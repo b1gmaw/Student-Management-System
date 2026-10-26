@@ -369,10 +369,16 @@ console.log("\n9. the two role lists are now permission checks");
   check("getUpcomingForUser excludes admin/master BEFORE the permission test",
     /if \(_isAdminRole_\(role\) \|\| myRole === "master" \|\| myRole === "admin"\) return \[\];[\s\S]{0,400}_hasPerm_\(role, perms, "view_admissions"\)/.test(SRC),
     "_hasPerm_ returns true for master unconditionally, so order is the control");
-  // Deliberately NOT generalised: it encodes a specific 営業 workflow.
-  check("the booking-cancellation branch still names 営業 specifically",
-    /actorRole === "sales"/.test(SRC),
-    "a custom role must not inherit a workflow that is not a permission");
+  // ⚠️ REVERSED 2026-10-26. The booking-ownership check named 営業 by the role the BROWSER sent,
+  // so a custom role (or a crafted call with any other role string) edited anyone's booking. The
+  // screen applies ownership to every non-admin (calHandleClick's isOwner), and the server now
+  // mirrors it from the session through _scheduleDenyReason_ (tests/authz.test.js §2).
+  const lockedBody = (SRC.match(/function _saveScheduleBatchLocked_\([\s\S]*?\n\}/) || [""])[0]
+    .replace(/\/\/[^\n]*/g, "");
+  check("the save loop decides ownership through _scheduleDenyReason_",
+    /_scheduleDenyReason_\(/.test(lockedBody), "");
+  check("⚠️ ...and reads no browser-sent role or name for it",
+    !/actorRole\s*===|actorName\)/.test(lockedBody), "a client value deciding ownership is the §3.1 shape");
 }
 
 console.log("\n10. _roles_() is safe on the login path");
@@ -559,10 +565,10 @@ console.log("\n12. screens gated by role, not permission — the 学生数 / 部
 
 console.log("\n13. `admin` is unassignable; 管理者権限 is master-only");
 {
-  // ⚠️ `admin` is not a permission bundle. _isAdminRole_ gates SEVEN operations no
+  // ⚠️ `admin` is not a permission bundle. _isAdminRole_ gates SIX operations no
   // tickable permission grants: restoreSnapshot, getSnapshotList, getActivityLog,
-  // diagnoseInChargeMatching, deleteBuilding (cascade), saveDestinationAlias and
-  // saveDestinationOverride.
+  // deleteBuilding (cascade), saveDestinationAlias and saveDestinationOverride.
+  // (diagnoseInChargeMatching was the seventh until 2026-10-26.)
   //
   // Before custom roles the dropdown offered only 営業/教務 and the role was frozen
   // on edit — two accidental barriers, both removed by making roles selectable.
@@ -585,7 +591,7 @@ console.log("\n13. `admin` is unassignable; 管理者権限 is master-only");
   const FLAGGED = [{ key: "jimu", admin: true }];
   check("a manage_users holder cannot assign the admin role",
     threw(() => saveSystemUserRole({ role: "admin", id: "S9" }, false, true)) !== "",
-    "self-promotion to admin picks up seven ops no permission grants");
+    "self-promotion to admin picks up six ops no permission grants");
   // ⚠️ And neither can the master any more. 管理者権限 on a custom role is the only
   // way to grant those operations, which keeps the person's department as the role
   // everyone sees — the point of the whole feature.
@@ -594,7 +600,7 @@ console.log("\n13. `admin` is unassignable; 管理者権限 is master-only");
     "two ways to grant one thing, and this one renames somebody 管理者 on every screen");
   check("a flagged custom role is still master-only",
     threw(() => saveSystemUserRole({ role: "jimu", id: "S9" }, false, true, FLAGGED)).indexOf("マスター") !== -1,
-    "the flag grants the same seven operations");
+    "the flag grants the same six operations");
   check("...and the master can assign a flagged role",
     saveSystemUserRole({ role: "jimu", id: "S9" }, true, false, FLAGGED) === "saved", "");
   check("ordinary roles are unaffected by the guard",
@@ -626,12 +632,12 @@ console.log("\n13. `admin` is unassignable; 管理者権限 is master-only");
 
 console.log("\n14. 管理者権限 — power without renaming the role");
 {
-  // The point: a department manager gains the seven admin-only operations while
+  // The point: a department manager gains the six admin-only operations while
   // their role still DISPLAYS as their department. So the flag must be separable
   // from both the key and the label.
   //
   // ⚠️ Two predicates, and conflating them breaks the feature in one direction or
-  // the other. _isAdminLevel_ governs the seven operations; _isAdminRole_ governs
+  // the other. _isAdminLevel_ governs the six operations; _isAdminRole_ governs
   // BEHAVIOUR (notification feed, whether ホーム shows an interview list) and must
   // stay literal, or a 教務部 manager stops seeing their own interviews.
   function _isAdminRoleT(role, roles) {
@@ -693,7 +699,7 @@ console.log("\n14. 管理者権限 — power without renaming the role");
   check("an admin with manage_users cannot assign a FLAGGED department role",
     threw(() => assign({ role: "kyomu_bu" }, false, ROLES)).indexOf("マスター") !== -1,
     "otherwise the flag is a way around the guard it needs — assign yourself 教務部 " +
-    "and pick up all seven operations");
+    "and pick up all six operations");
   check("...nor the literal admin role",
     threw(() => assign({ role: "admin" }, false, ROLES)) !== "", "");
   check("the master can assign a flagged role",
@@ -713,7 +719,7 @@ console.log("\n14. 管理者権限 — power without renaming the role");
       "widening this changes a department manager's ホーム and notifications");
   });
   ["getActivityLog", "getSnapshotList", "restoreSnapshot", "deleteBuilding",
-   "saveDestinationAlias", "saveDestinationOverride", "diagnoseInChargeMatching"].forEach(function (fn) {
+   "saveDestinationAlias", "saveDestinationOverride"].forEach(function (fn) {
     const at = SRC.indexOf("\nfunction " + fn + "(");
     const body = at === -1 ? "" : SRC.slice(at, SRC.indexOf("\n}\n", at));
     check(fn + " is guarded by _isAdminLevel_",
@@ -889,7 +895,7 @@ console.log("\n16. 管理者権限 OVERRIDES the role — everything short of ma
   };
 
   // ⚠️ BOTH DIRECTIONS. One without the other is the reported bug: a flagged 営業 was
-  // refused ユーザー管理 because the flag granted the seven operations but not the
+  // refused ユーザー管理 because the flag granted the six operations but not the
   // permission the sidebar gates on.
   check("a flagged user reaches a permission they were never ticked",
     hasPerm(false, true, "view_students", "manage_users") === true,

@@ -72,7 +72,7 @@ console.log("\n2. the gates — and the one that was broken");
     /if \(key === 'safety'\) return isAdminRole\(\);/.test(allow),
     "shown on manage_users alone, its three buttons each answered 権限がありません");
   // The server half of that claim — the gate is only right if these really require admin level.
-  ['getActivityLog', 'getSnapshotList', 'diagnoseInChargeMatching'].forEach(function (f) {
+  ['getActivityLog', 'getSnapshotList'].forEach(function (f) {
     check("...because " + f + " requires _isAdminLevel_",
       new RegExp('function ' + f + '\\([^)]*\\) \\{\\s*if \\(!_isAdminLevel_\\(').test(CODE), "");
   });
@@ -134,7 +134,8 @@ console.log("\n4. the editor, in the order decisions are made");
   check("⚠️ modalUserAdmin is still NOT a perm-cb",
     !/class="perm-cb"[^>]*id="modalUserAdmin"/.test(modal) && !/id="modalUserAdmin"[^>]*class="perm-cb"/.test(modal), "");
   const vals = (modal.match(/class="perm-cb" value="([a-z_]+)"/g) || []).map(function (t) { return t.match(/value="([a-z_]+)"/)[1]; });
-  check("25 permission boxes", vals.length === 25, "found " + vals.length);
+  // 27 since 2026-10-01: 入学予定者 表示 / 編集・キャンセル joined the 学生一覧 group.
+  check("27 permission boxes", vals.length === 27, "found " + vals.length);
   check("...no key twice", new Set(vals).size === vals.length, "");
   const groups = modal.match(/<fieldset class="perm-group" data-group="[^"]+">[\s\S]*?<\/fieldset>/g) || [];
   check("five screen groups", groups.length === 5, "found " + groups.length);
@@ -372,16 +373,22 @@ console.log("\n12. 操作履歴・バックアップ — one panel per tool");
 {
   check("⚠️ the shared output box is gone", !/dataSafetyContent/.test(HTML),
     "three tools writing one box meant each replaced the others' output");
-  ['log', 'snap', 'incharge'].forEach(function (m) {
+  ['log', 'snap'].forEach(function (m) {
     check("chip ds-mode-" + m + " and pane ds-pane-" + m,
       new RegExp('id="ds-mode-' + m + '" class="mode-btn').test(HTML) && new RegExp('id="ds-pane-' + m + '"').test(HTML), "");
   });
+  // ⚠️ 担当名チェック was REMOVED 2026-10-26 (a booking's 担当 is its booker's account name, never
+  // typed). All of it, so it cannot half-return: a chip with no pane, or a registry entry naming a
+  // deleted function, which would take down every endpoint.
+  check("⚠️ 担当名チェック is gone: no chip, pane, mode, client function, endpoint or registry entry",
+    !/ds-mode-incharge|ds-pane-incharge|dsInCharge|担当名チェック|runInChargeDiagnostic/.test(HTML) &&
+    !/'incharge'/.test((JS.match(/const DS_MODES = \[[^\]]*\]/) || [''])[0]) &&
+    !/function diagnoseInChargeMatching\(/.test(CODE) && !/diagnoseInChargeMatching:/.test(CODE), "");
   const mode = bodyOf(JS, 'dsSetMode');
   check("⚠️ the chips and panes are SWEPT, and each tool loads once on first show",
     /DS_MODES\.forEach/.test(mode) && /if \(!_dsLoaded\[mode\]\)/.test(mode), "");
   check("each tool writes its OWN container",
-    /getElementById\('dsLog'\)/.test(bodyOf(JS, 'loadActivityLog')) && /getElementById\('dsSnap'\)/.test(bodyOf(JS, 'loadSnapshots'))
-      && /getElementById\('dsInCharge'\)/.test(bodyOf(JS, 'runInChargeDiagnostic')), "");
+    /getElementById\('dsLog'\)/.test(bodyOf(JS, 'loadActivityLog')) && /getElementById\('dsSnap'\)/.test(bodyOf(JS, 'loadSnapshots')), "");
   // ⚠️ Header names, never indexes: row 1 of the audit sheet, sent verbatim.
   check("⚠️ log headers are mapped BY NAME, and 役割 found by name",
     /const DS_LOG_HEADERS = \{ Timestamp: '日時'/.test(JS) && /\.indexOf\('Role'\)/.test(bodyOf(JS, 'dsFilterLog'))
@@ -404,8 +411,6 @@ console.log("\n12. 操作履歴・バックアップ — one panel per tool");
     JSON.stringify(order(['Zeta__20260910_080000', 'Alpha__20260911_120000'])) === JSON.stringify(['Alpha', 'Zeta']), "");
   check("...and the source matches the transcription",
     /const order = Object\.keys\(by\)\.sort\(function \(x, y\) \{ return newest\[x\] < newest\[y\] \? 1/.test(snaps), "");
-  check("⚠️ the 担当 check names ユーザー管理, never the internal sheet",
-    !/Staff_Master/.test(bodyOf(JSNC, 'runInChargeDiagnostic')) && /ユーザー管理の名前/.test(bodyOf(JS, 'runInChargeDiagnostic')), "");
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

@@ -166,7 +166,7 @@ console.log("\n3. language columns are found by NAME, never by position");
     native({ text: { 'タガログ語': row2[5] } }, 'タガログ語') === "", "");
 
   check("the source builds its row against the CURRENT headers",
-    /let row = headers\.map\(function \(h\) \{[\s\S]{0,200}return text\[h\] === undefined \? "" : String\(text\[h\]\);/.test(CODE),
+    /const row = _cellSafeRow_\(headers\.map\(function \(h\) \{[\s\S]{0,200}return text\[h\] === undefined \? "" : String\(text\[h\]\);/.test(CODE),
     "a fixed column order here is the positional-drift bug this file keeps hitting");
   check("...and never indexes a language column by number",
     !/data\[i\]\[2\]|data\[i\]\[3\]/.test(CODE.slice(CODE.indexOf('function getScheduleBundle'),
@@ -282,7 +282,7 @@ console.log("\n6. wiring — the traps this app has hit before");
 
   // Every endpoint guarded, and by the permission not a role string.
   ['getScheduleBundle','saveScheduleTemplate','deleteScheduleTemplate',
-   'saveSchedulePhrase','deleteSchedulePhrase','addScheduleLanguage',
+   'saveSchedulePhrasesBatch','addScheduleLanguage',
    'getScheduleApplicants'].forEach(function (f) {
     const body = CODE.slice(CODE.indexOf('function ' + f + '('), CODE.indexOf('function ' + f + '(') + 400);
     check(f + " guards on its first line",
@@ -293,7 +293,7 @@ console.log("\n6. wiring — the traps this app has hit before");
 
   // ⚠️ Free text reaching a sheet: a value starting = is a formula, not a label.
   check("template and phrase writes go through _cellSafeRow_",
-    /const row = _cellSafeRow_\(\[name,/.test(CODE) && /row = _cellSafeRow_\(row\);/.test(CODE),
+    /const row = _cellSafeRow_\(\[name,/.test(CODE) && /const row = _cellSafeRow_\(headers\.map\(/.test(CODE),
     "a phrase starting with = becomes a live formula in the workbook");
 }
 
@@ -395,14 +395,18 @@ console.log("\n7. 日程の種別 — pick the day, the lines come with it");
     "a trailing comma would otherwise become a blank line");
   check("rows come back in 並び順",
     /out\.sort\(function \(a, b\) \{ return a\.order - b\.order; \}\)/.test(CODE), "");
-  ['saveScheduleDayType', 'deleteScheduleDayType'].forEach(function (f) {
-    check(f + " is guarded and registered",
-      /_hasPerm_\(role, perms, "manage_student_schedule"\)/.test(
-        CODE.slice(CODE.indexOf('function ' + f + '('), CODE.indexOf('function ' + f + '(') + 300))
-        && new RegExp("\\s" + f + ": " + f + ",").test(CODE), "");
+  // ⚠️ The per-row endpoints were DELETED on 2026-09-21. saveSchedulePhrasesBatch replaced them,
+  // and saveScheduleDayType found its row by the EDITABLE name, so a renamed 種別 appended a second
+  // row. Pinned ABSENT from the source and from the registry: brought back, they are callable by any
+  // session again, bug included, while no screen uses them.
+  ['saveScheduleDayType', 'deleteScheduleDayType', 'saveSchedulePhrase', 'deleteSchedulePhrase'].forEach(function (f) {
+    check("⚠️ " + f + " is gone — defined nowhere, registered nowhere",
+      // The KEY, whatever it points at: `saveSchedulePhrase: <anything>` re-exposes the name. Checking
+      // only the `name: name,` form let a key registered against another function slip through.
+      CODE.indexOf('function ' + f + '(') === -1 && !new RegExp("\\s" + f + ":").test(CODE), "");
   });
-  check("the day-type write goes through _cellSafeRow_",
-    /const row = _cellSafeRow_\(\[name, String\(\(dt && dt\.order\)/.test(CODE), "");
+  check("the day-type write goes through _cellSafeRow_ (in the batch that replaced the per-row endpoint)",
+    /const row = _cellSafeRow_\(\[name, String\(d\.order \|\| 0\)/.test(CODE), "");
 
   // ⚠️ Deleting a phrase can silently shorten a day type. Warn first.
   check("deleting a phrase names the day types that use it",
@@ -1281,8 +1285,15 @@ console.log("\n11. 文言管理 queues its edits — typing must not be interrup
     "otherwise one Escape throws the whole queue away with no warning");
 
   // ---- the endpoint --------------------------------------------------------
+  // ⚠️ Ends at the function that FOLLOWS the batch. It used to end at deleteScheduleDayType; once that
+  // was deleted, indexOf returned -1 and the slice silently ran to the end of Code.js, so every check
+  // below would have scanned ~2,500 lines it was never meant to see.
   const batch = CODE.slice(CODE.indexOf('function saveSchedulePhrasesBatch('),
-                           CODE.indexOf('function deleteScheduleDayType('));
+                           CODE.indexOf('function _schedTemplateSheet_('));
+  check("the batch slice is exactly the batch — one function, of a sane size",
+    batch.indexOf('function saveSchedulePhrasesBatch(') === 0
+      && (batch.match(/\nfunction /g) || []).length === 0 && batch.length > 1500 && batch.length < 8000,
+    "length " + batch.length + " — a -1 end anchor makes this the rest of the file");
   check("the batch is permission-guarded like its siblings",
     /_hasPerm_\(role, perms, "manage_student_schedule"\)/.test(batch), "");
   check("⚠️ every write goes through _cellSafeRow_",

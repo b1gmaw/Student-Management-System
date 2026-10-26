@@ -178,28 +178,15 @@ console.log("\n5. the snapshot writes safely");
     "recording before the sync would snapshot yesterday's roster");
 }
 
-console.log("\n6. the backfill cannot invent departures or overwrite measurements");
+console.log("\n6. the one-off backfill is retired (2026-09-21)");
 {
-  const at = CODE.indexOf('function backfillEnrollmentHistory');
-  const body = CODE.slice(at, CODE.indexOf('\n}', CODE.indexOf('return added +', at)));
-  check("backfillEnrollmentHistory's body was located", at !== -1 && body.length > 300, "");
-  check("it is behind the maintenance unlock",
-    /_requireMaintenanceUnlock_\("backfillEnrollmentHistory"\)/.test(body),
-    "it writes history; it must not be web-callable by anyone");
-  // ⚠️ It writes 合計 and 入学期 ONLY — never 国籍/コース/性別 — so a backfilled
-  // month stays distinguishable from a measured one (section 3).
-  check("it writes only 合計 and 入学期",
-    /"合計"/.test(body) && /"入学期"/.test(body) &&
-    body.indexOf('"国籍"') === -1 && body.indexOf('"性別"') === -1,
-    "writing the breakdowns would make a reconstruction look like a measurement");
-  check("it never overwrites an existing month",
-    /if \(m >= thisMonth \|\| have\[m\]\) return;/.test(body),
-    "a real measurement must win over a reconstruction");
-  check("it batches its write too",
-    /\.setValues\(rows\.map\(_cellSafeRow_\)\)/.test(body), "");
-  check("it says the numbers are joins-only",
-    /入学者数のみ/.test(body),
-    "a silent partial history is worse than none");
+  // backfillEnrollmentHistory reconstructed the pre-recording months once, in staging and production.
+  // Its rows stay in the sheet marked ENROL_AUTO, and section 3 keeps them distinguishable from a
+  // measured month. ⚠️ If a backfill is ever needed again, restore it from git history TOGETHER with
+  // this section's old checks: it wrote 合計 and 入学期 only, never overwrote an existing month, batched
+  // its write through _cellSafeRow_, and said its numbers were joins-only.
+  check("the one-off backfill is gone from the source",
+    CODE.indexOf('function backfillEnrollmentHistory') === -1, "");
 }
 
 console.log("\n7. 年度 runs April to March");
@@ -368,13 +355,43 @@ console.log("\n11. the client presents unknowns as unknown");
     /net === null \? dash/.test(body), "");
   check("an uncomputable 出 renders as a dash, not 0",
     /out === null \? dash : out/.test(body), "");
-  check("出 uses the previous month, crossing the 年度 boundary",
-    /pv \+ jn - cur/.test(body) && /prevYm/.test(body), "");
+  // Since 2026-10-06 出 is decided in ONE helper (_stuTrendOut), shared with both exports.
+  const outSrc = (function () { const i = HTML.indexOf('      function _stuTrendOut('); return i < 0 ? '' : HTML.slice(i, HTML.indexOf('\n      }\n', i) + 8); })();
+  // 出 is counted from 卒業年月日 since 2026-10-06 (§24); 前月差 is what still needs the previous
+  // month, across the 年度 boundary.
+  check("前月差 uses the previous month, crossing the 年度 boundary; 出 comes from the one helper",
+    /pv = _stuTrendNum\(by, _stuPrevYm\(ym\), 'total'\)/.test(body) && /const net = \(cur === null \|\| pv === null\) \? null : \(cur - pv\);/.test(body) &&
+    /const out = _stuTrendOut\(by, ym\);/.test(body) && outSrc !== "", "");
+  // The helper is module-level since C7 (2026-09-28), shared with the export's _stuTrendGrid —
+  // so run the REAL one rather than trusting its name appears.
+  const pySrc = (function () { const i = HTML.indexOf('      function _stuPrevYm('); return i < 0 ? '' : HTML.slice(i, HTML.indexOf('\n      }\n', i) + 8); })();
+  const realPrev = pySrc ? new Function(pySrc + '; return _stuPrevYm;')() : function () { return null; };
+  check("_stuPrevYm: 2026-04 → 2026-03, and 2026-01 → 2025-12 across the calendar year",
+    realPrev('2026-04') === '2026-03' && realPrev('2026-01') === '2025-12' && realPrev('2026-11') === '2026-10',
+    [realPrev('2026-04'), realPrev('2026-01'), realPrev('2026-11')].join(' '));
+  const numSrc = (function () { const i = HTML.indexOf('      function _stuTrendNum('); return i < 0 ? '' : HTML.slice(i, HTML.indexOf('\n      }\n', i) + 8); })();
+  const realNum = numSrc ? new Function(numSrc + '; return _stuTrendNum;')() : function () { return 'missing'; };
+  const BY = { a: { total: '12', joined: '' }, b: { total: 'x' }, c: { total: 0, joined: '3' } };
+  check("_stuTrendNum: a figure, and null (never 0) for blank, unparseable or missing",
+    realNum(BY, 'a', 'total') === 12 && realNum(BY, 'a', 'joined') === null && realNum(BY, 'b', 'total') === null &&
+    realNum(BY, 'zz', 'total') === null && realNum(BY, 'c', 'total') === 0 && realNum(BY, 'c', 'joined') === 3, "");
+  {
+    const mut = pySrc.replace("m--; if (m === 0) { m = 12; y--; }", "m--;");
+    const mp = new Function(mut + '; return _stuPrevYm;')();
+    check("  mutation: without the year roll 2026-01 is not 2025-12 — caught", mut !== pySrc && mp('2026-01') !== '2025-12', mp('2026-01'));
+    const mutN = numSrc.replace("return isNaN(n) ? null : n;", "return isNaN(n) ? 0 : n;");
+    const mn = new Function(mutN + '; return _stuTrendNum;')();
+    check("  mutation: an unparseable month read as 0 — caught", mutN !== numSrc && mn(BY, 'b', 'total') === 0, String(mn(BY, 'b', 'total')));
+  }
   check("月平均 divides by the FILLED months",
     /filled \? \(Math\.round\(\(sum \/ filled\)/.test(body),
     "dividing by 12 would report a part-finished year as a collapse");
-  check("the same-month blind spot is stated to the user",
-    /同じ月に入学して退学した学生は反映されません/.test(HTML),
+  // Since 2026-10-06 出 is counted from 卒業年月日, so the caveat is the missing date, not the
+  // arithmetic's same-month blind spot.
+  // Since the rebuild (2026-10-06, §24) every figure comes from 始業日 / 卒業年月日, and the caveat
+  // is how many students were estimated or left out.
+  check("how the figures are built is stated to the user, with the estimated / excluded counts",
+    /入は始業日の月（年は学籍番号の入学期から。始業日が空欄なら入学期）、出は卒業年月日から集計しています（月末時点）/.test(HTML) && /名は修了期の終わりで計上/.test(HTML) && /名は集計外/.test(HTML),
     "an unstated caveat on a table of numbers is worse than an admitted one");
   check("月末締 is stated", /毎月月末締/.test(HTML), "");
   check("hand-entered months are visually marked",
@@ -391,8 +408,8 @@ console.log("\n11. the client presents unknowns as unknown");
   const ex = HTML.slice(exAt, exAt + 1600);
   check("the CSV export's body was located", exAt !== -1 && /_expCsv/.test(ex),
     "the anchor matched a different export");
-  check("the export writes blank for unknown, not 0",
-    /\(pv === null \|\| jn === null\) \? '' :/.test(ex),
+  check("the export writes blank for unknown, not 0 (前月差 with no previous month, 出 of a blank month)",
+    /pv === null \? '' : \(cur - pv\)/.test(ex) && /const o = _stuTrendOut\(by, ym\); return o === null \? '' : o;/.test(ex),
     "a 0 in a spreadsheet is a fact; a blank is an absence");
   check("the export marks hand-entered rows", /手動入力' : '自動記録/.test(ex), "");
   check("the export carries the 年度", /年度'/.test(ex), "");
@@ -629,48 +646,52 @@ console.log("\n16. what a Japanese keyboard actually produces");
 
 console.log("\n17. the 帳票 exports keep the block layout");
 {
-  // Transcribed geometry: [block][gap][block][gap]… the latest block 5 wide
-  // (月, 在籍者数, 前月差, 出, 入), the others 2 (月, 在籍者数).
-  const layout = function (fys, latest) {
+  // Transcribed geometry: [block][gap][block][gap]… EVERY block 5 wide (月, 在籍者数, 前月差,
+  // 出, 入) since 2026-10-07 — it was 5 for the newest only and 2 for the rest, hiding past
+  // years' churn.
+  const layout = function (fys, w) {
     let starts = {}, width = 0;
     fys.forEach(function (fy, i) {
       if (i > 0) width += 1;
       starts[fy] = width;
-      width += (fy === latest) ? 5 : 2;
+      width += w(fy);
     });
     return { starts: starts, width: width };
   };
-  const L = layout([2023, 2024, 2025, 2026], 2026);
-  check("four years occupy 2+1+2+1+2+1+5 columns", L.width === 14, "got " + L.width);
+  const FIVE = function () { return 5; };
+  const L = layout([2023, 2024, 2025, 2026], FIVE);
+  check("four years occupy 5+1+5+1+5+1+5 columns", L.width === 23, "got " + L.width);
   check("the first block starts at 0", L.starts[2023] === 0, "");
   // ⚠️ THE gap column. Without it the blocks abut and the year headers merge into
   // each other's columns — the report stops being readable as separate years.
   check("there is a gap column between blocks",
-    L.starts[2024] === 3 && L.starts[2025] === 6, JSON.stringify(L.starts));
-  check("the latest block is five wide and last",
-    L.starts[2026] === 9 && L.width - L.starts[2026] === 5, JSON.stringify(L.starts));
+    L.starts[2024] === 6 && L.starts[2025] === 12 && L.starts[2026] === 18, JSON.stringify(L.starts));
+  check("  mutation: the old newest-only geometry is 14 columns, not 23",
+    layout([2023, 2024, 2025, 2026], function (fy) { return fy === 2026 ? 5 : 2; }).width === 14);
 
-  const merges = function (fys, latest, st, hdr) {
-    return fys.map(function (fy) {
-      const w = (fy === latest) ? 5 : 2;
-      return { c: st[fy], e: st[fy] + w - 1 };
-    });
+  const merges = function (fys, st) {
+    return fys.map(function (fy) { return { c: st[fy], e: st[fy] + 5 - 1 }; });
   };
-  const M = merges([2023, 2024, 2025, 2026], 2026, L.starts);
+  const M = merges([2023, 2024, 2025, 2026], L.starts);
   // ⚠️ A merge one column too wide puts a 年度 header over the next year's month
   // column, and the numbers underneath then read as the wrong year.
   check("each 年度 merge covers exactly its own block",
     M.every(function (x, i) { return i === 0 || x.c > M[i - 1].e; }),
     JSON.stringify(M));
   check("no merge reaches into the gap",
-    M[0].e === 1 && M[1].c === 3, JSON.stringify(M));
+    M[0].e === 4 && M[1].c === 6, JSON.stringify(M));
 
   const src = HTML.slice(HTML.indexOf('function _stuTrendGrid'), HTML.indexOf('function _stuTrendFileName'));
   check("_stuTrendGrid's body was located", src.length > 1500, "");
   check("it lays out with a gap column",
     /if \(i > 0\) width \+= 1;/.test(src), "");
-  check("the latest block is five wide",
-    /width \+= \(fy === latest\) \? 5 : 2;/.test(src), "");
+  check("every block is STU_TREND_BLOCK_COLS (5) wide",
+    /width \+= STU_TREND_BLOCK_COLS;/.test(src) && /const STU_TREND_BLOCK_COLS = 5;/.test(HTML), "");
+  check("no newest-only branch remains in the table, the Excel grid or the PDF",
+    !/fy === latest/.test(HTML) && !/fy === m\.latest/.test(HTML) && !/const wide = /.test(HTML), "");
+  check("the Excel grid writes 前月差 / 出 / 入 for every block",
+    /aoa\[sub\]\[c \+ 2\] = '前月差'; aoa\[sub\]\[c \+ 3\] = '出'; aoa\[sub\]\[c \+ 4\] = '入';/.test(src) &&
+    /\n            row\[c \+ 2\] = \(cur === null \|\| pv === null\) \? '' : \(cur - pv\);/.test(src), "");
   check("the 12 months run 4月 to 3月", /STU_FY_MONTHS\.forEach/.test(src), "");
   check("月平均 is the last data row", /avgRow\[c\] = '月平均';/.test(src), "");
   // ⚠️ Same rule as the screen: an absent figure exports blank, never 0.
@@ -679,10 +700,10 @@ console.log("\n17. the 帳票 exports keep the block layout");
   check("月平均 divides by the filled months",
     /fills\[fy\] \? \(Math\.round\(\(sums\[fy\] \/ fills\[fy\]\)/.test(src), "");
   check("the captions travel with the file",
-    /毎月月末締。年度は4月〜翌3月。/.test(src) && /同じ月に入学して退学した学生は反映されません/.test(src),
+    /毎月月末締。年度は4月〜翌3月。/.test(src) && /_stuTrendBasis\(\)/.test(src),
     "a printed report outlives the screen that explained it");
-  check("the 自動/手動 split is a footnote, not a column",
-    /自動記録 ' \+ autoN \+ 'か月/.test(src),
+  check("the 手動入力 count is a footnote, not a column",
+    /'手動入力 ' \+ manualN \+ 'か月'/.test(src),
     "a column would break the grid the reference report uses");
 }
 
@@ -1224,6 +1245,400 @@ console.log("\n23. the roster and the 合計 count the same people");
   check("a renamed 学籍番号 column empties the roster while 合計 counts on",
     bucketsTotal(noId) === 2 && studentIds(noId).length === 0,
     "which is what makes the next run HOLD rather than record a school of zero");
+}
+
+console.log("\n24. 在籍数 / 入 / 出 rebuilt from 始業日 and 卒業年月日 (2026-10-06)");
+{
+  const vm = require('vm');
+  const extract = (src, name) => {
+    const st = src.indexOf("\nfunction " + name + "(");
+    if (st < 0) throw new Error("missing " + name);
+    let i = src.indexOf("{", st), d = 0;
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === "/" && src[i + 1] === "/") { i = src.indexOf("\n", i); continue; }
+      if (c === '"' || c === "'" || c === "`") { for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++; continue; }
+      if (c === "/" && /[=(,:!&|?{};]\s*$/.test(src.slice(Math.max(0, i - 3), i))) {
+        for (i++; i < src.length && src[i] !== "/"; i++) { if (src[i] === "\\") i++; else if (src[i] === "[") { while (src[++i] !== "]") if (src[i] === "\\") i++; } }
+        continue;
+      }
+      if (c === "{") d++;
+      if (c === "}" && --d === 0) return src.slice(st + 1, i + 1);
+    }
+  };
+  const SERVER = ['getEnrollmentHistory', 'getEnrollmentMonthDetail', '_enrolPeople_', '_readEnrolRosters_', '_enrolDatedSeries_', '_enrolYm_', '_enrolStartYm_', '_enrolDateCells_', '_intakeKeyFromStudentId_', '_enrolCohortEndYm_', '_enrolOutYm_', '_ymNorm_', '_ymAdd_'];
+  // Central_DB: 学籍番号 / 始業日. Past_DB: 学籍番号 / 始業日 / 修了期 / 卒業年月日.
+  const CH = ['学籍番号', '国名', '始業日'], PH = ['学籍番号', '国籍', '始業日', '修了期', '卒業年月日', '備考'];
+  function run(code, central, past, hist, today) {
+    const ctx = vm.createContext({
+      _permOrLegacyRole_: () => true, _hasPerm_: () => true,
+      _ymKey_: () => today || '2026-10', Utilities: {},
+      SHEET_ENROL_HISTORY: 'Enrollment_History', ENROL_MANUAL: '手動', ENROL_RETURN_KIND: '復帰',
+      SHEET_ENROL_ROSTER: 'Enrollment_Roster',
+      SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: (n) => {
+        const rows = n === 'Enrollment_History' ? hist : (n === 'Enrollment_Roster' ? (global.__roster || null) : null);
+        return rows ? { getDataRange: () => ({ getDisplayValues: () => rows.map(r => r.map(String)) }) } : null; } }) },
+      _readTabs_: () => { if (central === 'throw') throw new Error('x'); return { Central_DB: central, Past_DB: past }; },
+    });
+    vm.runInContext(SERVER.map(n => extract(code, n)).join("\n"), ctx);
+    const res = ctx.getEnrollmentHistory('', '');
+    const by = {}; res.rows.forEach(r => { by[r.month] = r; });
+    return { res, by };
+  }
+  // The reported case. 602 enrolled at the end of August 2026; 26 of them graduate in September
+  // (whenever their rows were moved); nobody starts in September; 36 start in October.
+  const central = [CH], past = [PH];
+  for (let i = 0; i < 576; i++) central.push(['C' + i, 'ネパール', '2025/04/08']);
+  for (let i = 0; i < 26; i++) past.push(['P' + i, 'ネパール', '2025/04/08', '2025.4~2026.3', '2026/09/' + String(1 + i % 28).padStart(2, '0'), '']);
+  for (let i = 0; i < 36; i++) central.push(['N' + i, 'ネパール', '2026/10/06']);
+  const { res, by } = run(CODE, central, past, null);
+  check("⚠️ THE REPORTED CASE: September = 602 − 26 = 576, 出 26, 入 0, 前月差 −26",
+    by['2026-08'].total === 602 && by['2026-09'].total === 576 && by['2026-09'].left === 26 && by['2026-09'].joined === 0 && by['2026-09'].net === -26,
+    JSON.stringify([by['2026-08'], by['2026-09']]));
+  check("October: 576 + 36 = 612, 入 36", by['2026-10'].total === 612 && by['2026-10'].joined === 36, JSON.stringify(by['2026-10']));
+  const ms = Object.keys(res.series).sort();
+  check("the identity holds EVERY month: 在籍(M) = 在籍(M−1) + 入 − 出",
+    ms.every((m, i) => i === 0 || res.series[m].total === res.series[ms[i - 1]].total + res.series[m].joined - res.series[m].left));
+  check("rows are the current 年度 and the three before it, through this month",
+    res.rows[0].month === '2023-04' && res.rows[res.rows.length - 1].month === '2026-10', res.rows[0].month + '…' + res.rows[res.rows.length - 1].month);
+  check("series reaches the earliest 始業日", ms[0] === '2025-04', ms[0]);
+  check("a month before anyone started has no figure (null), not 0", by['2023-04'].total === null && by['2023-04'].net === null);
+
+  // Estimated ends, edge cases.
+  const p2 = [PH,
+    ['E1', 'x', '2024/04/08', '2024.4~2025.3', '', ''],          // no date → end of 修了期: 2025-03
+    ['E2', 'x', '2026/04/08', '2026.4~', '', ''],                // open tab → last month (2026-09)
+    ['E3', 'x', '2023/04/08', '2024.3まで', '2024年3月31日', ''],  // a typed date
+    ['E4', 'x', '', '2024.4~2025.3', '2025/03/31', ''],           // no 始業日 → nowhere
+    ['E5', 'x', '2025/04/08', '2024.4~2025.3', '2024/03/31', ''],  // ends before it starts → dropped
+    ['DUP', 'x', '2024/04/08', '2024.4~2025.3', '2025/03/31', '']]; // also in Central → Central wins
+  const c2 = [CH, ['DUP', 'x', '2024/04/08']];
+  const r2 = run(CODE, c2, p2, null).res;
+  // A March end is counted out in APRIL (immigration counts March leavers as enrolled, §27).
+  check("no 卒業年月日 → counted until its 修了期 ends (2025-03), its 出 in April", r2.series['2025-03'].left === 0 && r2.series['2025-04'].left >= 1 && r2.estimatedEnd === 2, JSON.stringify([r2.series['2025-03'], r2.series['2025-04'], r2.estimatedEnd]));
+  // Since 2026-10-06 an open tab, undated and on no monthly list, ends at its START (§26).
+  check("the open tab (2026.4~) with no date and no list ends at its START, 2026-04", r2.series['2026-04'].left === 1 && r2.series['2026-09'].left === 0, JSON.stringify([r2.series['2026-04'], r2.series['2026-09']]));
+  check("a typed 「2024年3月31日」 is read (a March end: 出 in April)", r2.series['2024-04'].left === 1 && r2.series['2024-03'].left === 0);
+  check("no 始業日 → counted nowhere (noStart); an end before its start → dropped", r2.noStart === 1 && r2.dropped === 1, JSON.stringify([r2.noStart, r2.dropped]));
+  check("a 学籍番号 in both sheets is ONE person, still enrolled (Central wins)", r2.series['2026-10'].total === 1 + 0, JSON.stringify(r2.series['2026-10']));
+  check("unreadable sheets → no rows and an error, never the snapshot", (() => { const r = run(CODE, 'throw', null, null).res; return r.rows.length === 0 && !!r.error; })());
+
+  // Start = the 学籍番号's intake, 始業日 cross-checking it (decided 2026-10-06).
+  const c4 = central.filter(r => !/^N/.test(r[0]));
+  for (let i = 0; i < 36; i++) c4.push(['2026100' + String(i).padStart(2, '0'), 'ネパール', '']);
+  const r4 = run(CODE, c4, past, null);
+  check("36 October joiners with a blank 始業日 count in October by 学籍番号 (入 36, 在籍 612)",
+    r4.by['2026-10'].joined === 36 && r4.by['2026-10'].total === 612 && r4.res.startMismatch === 0, JSON.stringify([r4.by['2026-10'], r4.res.startMismatch]));
+  // Since 2026-10-07 (the maintainer's checker): the YEAR from the 学籍番号, the MONTH from 始業日.
+  // 始業日's own year holds typos — a 202507 student entered as 2026/07.
+  const sx = vm.createContext({}); vm.runInContext(['_enrolStartYm_', '_enrolYm_', '_intakeKeyFromStudentId_', '_ymNorm_'].map(n => extract(CODE, n)).join("\n"), sx);
+  const S = (raw, sid) => sx._enrolStartYm_(raw, sid);
+  check("⚠️ THE USER'S CASE: 202507 typed 2026/07/08 → 2025-07, corrected and flagged",
+    S('2026/07/08', '2025070001').ym === '2025-07' && S('2026/07/08', '2025070001').fixed === true &&
+    S('2026/07/08', '2025070001').src === '始業日（年を学籍番号で補正: 2026→2025）', JSON.stringify(S('2026/07/08', '2025070001')));
+  check("202504 with a 始業日 of 2025/05/07 joins in May — the month is 始業日's, unflagged",
+    S('2025/05/07', '2025040001').ym === '2025-05' && !S('2025/05/07', '2025040001').fixed && S('2025/05/07', '2025040001').mismatch === true &&
+    S('2025/05/07', '2025040001').src === '始業日');
+  check("a month before the intake month is the year after: 202510 + 2026/02/10 → 2026-02, unflagged",
+    S('2026/02/10', '2025100001').ym === '2026-02' && !S('2026/02/10', '2025100001').fixed);
+  check("…and the same month typed with the intake's year is corrected: 202510 + 2025/02/10 → 2026-02, flagged",
+    S('2025/02/10', '2025100001').ym === '2026-02' && S('2025/02/10', '2025100001').fixed === true);
+  check("an agreeing 始業日 → src 始業日, nothing flagged",
+    S('2025/10/06', '2025100001').ym === '2025-10' && S('2025/10/06', '2025100001').src === '始業日' && !S('2025/10/06', '2025100001').fixed && !S('2025/10/06', '2025100001').mismatch);
+  check("a 始業日 with no year: 05/06 on 202504 → 2025-05; 02/10 on 202510 → 2026-02; src says so, unflagged",
+    S('05/06', '2025040001').ym === '2025-05' && S('5月6日', '2025040001').ym === '2025-05' && S('02/10', '2025100001').ym === '2026-02' &&
+    S('05/06', '2025040001').src === '始業日（年は学籍番号から）' && !S('05/06', '2025040001').fixed);
+  check("blank 始業日 → the intake, src 学籍番号", S('', '2026100001').ym === '2026-10' && !S('', '2026100001').mismatch && S('', '2026100001').src === '学籍番号');
+  check("an id without a YYYYMM head: a full 始業日 as written; with neither → nowhere",
+    S('2026/04/08', 'E9').ym === '2026-04' && S('2026/04/08', 'E9').src === '始業日' && S('', 'E4').ym === '' && S('10/06', 'X1').ym === '');
+  const c7 = [CH, ['2025070001', 'ネパール', '2026/07/08'], ['2025040001', 'ネパール', '2025/05/07'], ['2025040002', 'ネパール', '2025/04/08']];
+  const r7 = run(CODE, c7, [PH], null).res;
+  check("in the series: the typo'd 202507 student is 入 in 2025-07 (not 2026-07); the May starter in May",
+    r7.series['2025-07'].joined === 1 && r7.series['2026-07'].joined === 0 && r7.series['2025-05'].joined === 1 && r7.series['2025-04'].joined === 1 &&
+    r7.startFixed === 1 && r7.startMismatch === 1, JSON.stringify([r7.series['2025-07'], r7.series['2026-07'], r7.startFixed, r7.startMismatch]));
+  const dateWins = CODE.replace("  if (!intake) return full ? { ym: full,", "  if (full) return { ym: full, mismatch: false, fixed: false, src: \"始業日\" };\n  if (!intake) return full ? { ym: full,");
+  check("  mutation: letting a full 始業日 win (v260) puts the 202507 student in July 2026",
+    dateWins !== CODE && run(dateWins, c7, [PH], null).res.series['2026-07'].joined === 1);
+  const noFlag = CODE.replace("const fixed = !!full && typedY !== y;", "const fixed = false;");
+  check("  mutation: without the flag the correction is silent (startFixed 0)",
+    noFlag !== CODE && run(noFlag, c7, [PH], null).res.startFixed === 0);
+
+  // ⚠️ Dates are read as VALUES. _readTabs_ is FORMATTED_VALUE, and a column displayed MM/DD has no
+  // year in its display. 始業日's year now comes from the id, but 卒業年月日's has no other source:
+  // modelled as a display of 「09/15」 over a value of 2026-09-15.
+  {
+    const FN = ['_enrolPeople_', '_readEnrolRosters_', '_enrolYm_', '_enrolStartYm_', '_enrolDateCells_', '_intakeKeyFromStudentId_', '_enrolCohortEndYm_', '_enrolOutYm_', '_ymNorm_', '_ymAdd_'];
+    const PHX = ['学籍番号', '国籍', '始業日', '修了期', '卒業年月日'];
+    const shown = [PHX, ['2025040001', 'x', '04/08', '2025.4~2026.3', '09/15']];
+    const values = { 'Past_DB': { 3: [['04/08']], 5: [[new Date(2026, 8, 15)]] } };
+    const mk = (code, readThrows) => {
+      const ctx = vm.createContext({ _ymKey_: () => '2026-10', SHEET_ENROL_ROSTER: 'Enrollment_Roster',
+        Utilities: { formatDate: (d, tz, f) => d.getFullYear() + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') },
+        SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSpreadsheetTimeZone: () => 'Asia/Tokyo', getSheetByName: (n) => {
+          if (!values[n]) return null;
+          return { getLastRow: () => 2,
+                   getRange: (r, c, nr, nc) => { if (readThrows) throw new Error('x');
+                     return { getValues: () => (r === 2 && nr === 1 && values[n][c]) || [['']] }; } }; } }) },
+        _readTabs_: () => ({ Central_DB: [['学籍番号', '国名', '始業日']], Past_DB: shown }) });
+      vm.runInContext(FN.map(n => extract(code, n)).join("\n"), ctx);
+      return ctx._enrolPeople_('2026-10').byId['2025040001'];
+    };
+    const p = mk(CODE);
+    check("⚠️ 卒業年月日 is read as a VALUE: a 「09/15」 display over 2026-09-15 ends in 2026-09",
+      p.end === '2026-09' && p.endSrc === '卒業年月日' && p.start === '2025-04', JSON.stringify(p));
+    const fromDisplay = CODE.replace('_enrolYm_(cell("卒業年月日", iEnd, i))', '_enrolYm_(data[i][iEnd])');
+    check("  mutation: reading the display loses the year, and the end falls back to an estimate",
+      fromDisplay !== CODE && mk(fromDisplay).endSrc !== '卒業年月日', JSON.stringify(mk(fromDisplay)));
+    check("a failed value read falls back to the display text, never an error",
+      mk(CODE, true).start === '2025-04');
+    check("始業日 is read the same way", /const st = _enrolStartYm_\(cell\("始業日", iStart, i\), id\);/.test(CODE));
+  }
+  check("the identity still holds every month", (() => {
+    const ser = r4.res.series, k = Object.keys(ser).sort();
+    return k.every((m, i) => i === 0 || ser[m].total === ser[k[i - 1]].total + ser[m].joined - ser[m].left); })());
+  check("the note states the rule and counts the corrected years",
+    /入は始業日の月（年は学籍番号の入学期から。始業日が空欄なら入学期）/.test(HTML) && /始業日の年が学籍番号と合わない学生' \+ t\.startFixed \+ '名は学籍番号の年で計上/.test(HTML) &&
+    /startFixed: ser\.startFixed/.test(CODE));
+  check("a corrected year gets the warning badge; other 始業日 sources do not",
+    /src\.indexOf\('始業日（'\) === 0 && src\.indexOf\('始業日（年を学籍番号で補正'\) !== 0/.test(HTML));
+
+  // Hand-entered months keep their typed figures; 出 stays dated.
+  const hist = [H, ['2024-05', '合計', '', 700, '', '手動'], ['2024-05', '入', '', 9, '', '手動'], ['2026-08', '合計', '', 999, '', '']];
+  const r3 = run(CODE, central, past, hist).by;
+  check("a 手動 month the dates do NOT cover keeps its typed 在籍 / 入", r3['2024-05'].total === 700 && r3['2024-05'].joined === 9 && r3['2024-05'].entered === true, JSON.stringify(r3['2024-05']));
+  // ⚠️ THE +1 REPORT: September typed by hand (入 1) while the dates say 入 0 — the dates win.
+  const histSep = [H, ['2026-09', '合計', '', 999, '', '手動'], ['2026-09', '入', '', 1, '', '手動']];
+  const r6 = run(CODE, central, past, histSep).by['2026-09'];
+  check("⚠️ a 手動 month the dates DO cover shows the dated figures (576, 入 0), the typed ones reported as ignored",
+    r6.total === 576 && r6.joined === 0 && r6.entered === false && r6.typedIgnored && r6.typedIgnored.total === 999 && r6.typedIgnored.joined === 1, JSON.stringify(r6));
+  const typedWins = CODE.replace("const entered = typed && !d;", "const entered = typed;").replace("    if (d) return d.total;\n    return typedTotals[m] !== undefined ? typedTotals[m] : null;", "    if (typedTotals[m] !== undefined) return typedTotals[m];\n    return d ? d.total : null;");
+  check("  mutation: letting a typed month win brings the phantom 入 1 back", typedWins !== CODE && run(typedWins, central, past, histSep).by['2026-09'].joined === 1);
+  check("...while a 自動 snapshot row is NOT shown (2026-08 stays 602, not 999)", r3['2026-08'].total === 602 && r3['2026-08'].entered === false);
+  check("...and 前月差 next to a typed month uses the typed figure", r3['2024-06'].net === null || typeof r3['2024-06'].net === 'number');
+
+  // Mutations.
+  const inclusive = CODE.replace("run += j - l;", "run += j; if (m !== first) run -= (left[_ymAdd_(m, -1)] || 0);");
+  check("  mutation: counting a September graduate as enrolled through September gives 602", inclusive !== CODE && run(inclusive, central, past, null).by['2026-09'].total === 602);
+  const noPast = CODE.replace('take(tabs.Past_DB, true);', '');
+  // (September alone would not catch it: without Past_DB the 26 vanish from August TOO, and 576
+  // reappears by coincidence. August is where it shows.)
+  check("  mutation: ignoring Past_DB drops the graduates from the months they were enrolled (August 576, not 602)",
+    noPast !== CODE && run(noPast, central, past, null).by['2026-08'].total === 576);
+  const noManual = CODE.replace('return typedTotals[m] !== undefined ? typedTotals[m] : null;', 'return null;');
+  check("  mutation: ignoring 手動 loses the typed 700", noManual !== CODE && run(noManual, central, past, hist).by['2024-05'].total !== 700);
+
+  // The import's column finder (unchanged from V 1.48.0).
+  const m = vm.createContext({}); vm.runInContext(extract(CODE, '_pastColumnIndex_'), m);
+  const P = m._pastColumnIndex_;
+  check("卒業年月日: the exact header wins over 卒業予定 to its left", P('卒業年月日', ['学籍番号', '卒業予定', '卒業年月日']) === 2);
+  check("...a variant is found, 卒業予定 / 卒業予定日 never",
+    P('卒業年月日', ['卒業予定', '修了年月日']) === 1 && P('卒業年月日', ['卒業予定', '卒業日']) === 1 && P('卒業年月日', ['卒業予定日']) === -1);
+  check("備考: exact over 寮備考; 備考（その他） accepted; absent → -1",
+    P('備考', ['寮備考', '備考']) === 1 && P('備考', ['寮備考', '備考（その他）']) === 1 && P('備考', ['寮備考']) === -1);
+  const loose = CODE.replace("&& h.indexOf(\"予定\") === -1) return c;", ") return c;");
+  const lm = vm.createContext({}); vm.runInContext(extract(loose, '_pastColumnIndex_'), lm);
+  check("  mutation: without the 予定 exclusion a variant search takes 卒業予定日", loose !== CODE && lm._pastColumnIndex_('卒業年月日', ['卒業予定日', '修了年月日']) === 0);
+  check("Past_DB's columns are APPENDED after 修了期", /"修了期",\s*\n(\s*\/\/[^\n]*\n)*\s*"卒業年月日", "備考"\s*\n\s*\],/.test(CODE));
+  const fm = vm.createContext({ AUDIT_SHEET: 'a', INTERVIEW_RESULTS_SHEET: 'b', SHEET_ANNOUNCEMENTS: 'c', SHEET_ENROL_HISTORY: 'd', SHEET_RECRUIT_NOTE: 'e', SCHED_TEMPLATE_SHEET: 'f' });
+  vm.runInContext(extract(CODE, '_dateColumnFormats_'), fm);
+  const pins = fm._dateColumnFormats_().filter(e => e.header === '卒業年月日');
+  check("卒業年月日 is pinned to yyyy/mm/dd on Past_DB only", pins.length === 1 && pins[0].sheet === 'Past_DB');
+
+  // The screen.
+  const fnOf = (n) => { const i = HTML.indexOf('      function ' + n + '('); return HTML.slice(i, HTML.indexOf('\n      }\n', i) + 8); };
+  const cx = vm.createContext({ _stuTrendEdits: {}, _stuTrendExtraYears: 0, _ymToday: () => '2026-10' });
+  vm.runInContext('var _stuTrend = null;\n' + ['_stuTrendSeries', '_stuTrendKnown', '_stuTrendOut', '_stuTrendNum', '_stuFiscalYear'].map(fnOf).join('\n'), cx);
+  cx._stuTrend = { today: '2026-10', series: res.series, rows: res.rows };
+  const mby = cx._stuTrendSeries();
+  const known = cx._stuTrendKnown(mby);
+  check("the screen shows 576 / 出 26 for September", mby['2026-09'].total === 576 && cx._stuTrendOut(mby, '2026-09') === 26);
+  check("series-only years do NOT all get drawn: known stays inside the four 年度", known.every(k => k >= '2023-04'));
+  cx._stuTrend = { today: '2026-10', series: { '2019-05': { total: 50, joined: 1, left: 0 } }, rows: [] };
+  cx._stuTrendExtraYears = 0;
+  check("...an old series month appears only once 「＋ 前年度」 reaches its 年度", cx._stuTrendKnown(cx._stuTrendSeries()).length === 0 &&
+    (() => { cx._stuTrendExtraYears = 4; return cx._stuTrendKnown(cx._stuTrendSeries()).indexOf('2019-05') !== -1; })());
+  check("⚠️ no copy of 前月+入−在籍 is left anywhere in the client", !/pv \+ jn - cur/.test(HTML));
+  check("the table, the Excel grid and the CSV all choose months through _stuTrendKnown", (HTML.match(/const known = _stuTrendKnown\(by\);/g) || []).length === 3);
+}
+
+console.log("\n25. a month's 入 / 出 by student, with where each date came from (2026-10-06)");
+{
+  const vm = require('vm');
+  const extract = (src, name) => {
+    const st = src.indexOf("\nfunction " + name + "(");
+    if (st < 0) throw new Error("missing " + name);
+    let i = src.indexOf("{", st), d = 0;
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === "/" && src[i + 1] === "/") { i = src.indexOf("\n", i); continue; }
+      if (c === '"' || c === "'" || c === "`") { for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++; continue; }
+      if (c === "/" && /[=(,:!&|?{};]\s*$/.test(src.slice(Math.max(0, i - 3), i))) {
+        for (i++; i < src.length && src[i] !== "/"; i++) { if (src[i] === "\\") i++; else if (src[i] === "[") { while (src[++i] !== "]") if (src[i] === "\\") i++; } }
+        continue;
+      }
+      if (c === "{") d++;
+      if (c === "}" && --d === 0) return src.slice(st + 1, i + 1);
+    }
+  };
+  const FN = ['getEnrollmentMonthDetail', '_enrolPeople_', '_readEnrolRosters_', '_enrolDatedSeries_', '_enrolYm_', '_enrolStartYm_', '_enrolDateCells_', '_intakeKeyFromStudentId_', '_enrolCohortEndYm_', '_enrolOutYm_', '_ymNorm_', '_ymAdd_'];
+  const CH = ['学籍番号', '国名', '名前英語', '始業日'], PH = ['学籍番号', '国籍', '名前英語', '始業日', '修了期', '卒業年月日', '備考'];
+  // The reported shape: 26 dated September graduates, plus ONE student on the open 2026.4~ tab with
+  // a blank 卒業年月日 (estimated end = last month = September) whose start is ALSO September.
+  const central = [CH], past = [PH];
+  for (let i = 0; i < 576; i++) central.push(['C' + i, 'ネパール', 'C ' + i, '2025/04/08']);
+  for (let i = 0; i < 26; i++) past.push(['P' + i, 'ネパール', 'P ' + i, '2025/04/08', '2025.4~2026.3', '2026/09/15', '']);
+  past.push(['202609001', 'ベトナム', 'ODD ONE', '', '2026.4~', '', '']);
+  const ctx = vm.createContext({ _permOrLegacyRole_: () => true, _ymKey_: () => '2026-10',
+    _readTabs_: () => ({ Central_DB: central, Past_DB: past }) });
+  vm.runInContext(FN.map(n => extract(CODE, n)).join("\n"), ctx);
+  const d = ctx.getEnrollmentMonthDetail('2026-09');
+  // The reported shape (出 27 / 入 1) came from the open tab ending "last month". Since §26 it ends at
+  // its START (2026-04) — before this student's 学籍番号 start — so they are dropped, not invented.
+  check("the reported shape is gone: September lists 出 26 and 入 0", d.left.length === 26 && d.joined.length === 0, JSON.stringify([d.left.length, d.joined.length]));
+  check("...the odd student appears in no list", !d.left.concat(d.joined).some(r => r.id === '202609001'));
+  check("the 26 dated graduates show 卒業年月日 as their source", d.left.filter(r => r.src === '卒業年月日').length === 26);
+  const ser = ctx._enrolDatedSeries_('2026-10');
+  check("the lists equal the table's 入 / 出 for EVERY month (one per-student pass)", Object.keys(ser.months).every(m => {
+    const x = ctx.getEnrollmentMonthDetail(m); return x.joined.length === ser.months[m].joined && x.left.length === ser.months[m].left; }));
+  let threw = false; try { ctx.getEnrollmentMonthDetail('2026/09'); } catch (e) { threw = /年月が正しくありません/.test(e.message); }
+  check("a malformed 年月 is refused", threw);
+  const denied = vm.createContext({ _permOrLegacyRole_: () => false, _ymKey_: () => '2026-10', _readTabs_: () => ({}) });
+  vm.runInContext(extract(CODE, 'getEnrollmentMonthDetail'), denied);
+  let refused = false; try { denied.getEnrollmentMonthDetail('2026-09'); } catch (e) { refused = /権限がありません/.test(e.message); }
+  check("it is gated like getEnrollmentHistory (view_students)", refused &&
+    /function getEnrollmentMonthDetail\(ym\) \{\s*\n\s*if \(!_permOrLegacyRole_\("", "", "view_students", \["sales"\]\)\)/.test(CODE));
+  check("registered in the API allow-list", /getEnrollmentMonthDetail: getEnrollmentMonthDetail,/.test(CODE));
+
+  // The screen.
+  const fnOf = (n) => { const i = HTML.indexOf('      function ' + n + '('); return HTML.slice(i, HTML.indexOf('\n      }\n', i) + 8); };
+  const cx = vm.createContext({ escHtmlJs: (v) => String(v == null ? '' : v).replace(/</g, '&lt;') });
+  vm.runInContext("var STU_TREND_SURE_SRC = ['始業日', '学籍番号', '学籍番号・始業日', '卒業年月日', '在籍リストから外れた月'];\n" + fnOf('_stuTrendDetailHtml'), cx);
+  const html = cx._stuTrendDetailHtml({
+    joined: [{ id: '2025100001', name: 'NEW', nat: '', start: '2025-10', src: '学籍番号（始業日 2026/10/06 と不一致）' }],
+    left: [{ id: 'P1', name: 'A', nat: '', end: '2026-10', src: '卒業年月日' },
+           { id: 'P2', name: 'B', nat: '', end: '2026-10', src: '在籍リストから外れた月' },
+           { id: 'P3', name: 'C', nat: '', end: '2026-04', src: '修了期で推定（2026.4~）' }] });
+  check("the modal lists both sections with their counts", /入　1名/.test(html) && /出　3名/.test(html));
+  check("an ESTIMATED source is flagged (warning badge), a recorded one is not",
+    /u-badge u-warn">学籍番号（始業日 2026\/10\/06 と不一致）/.test(html) && /u-badge u-warn">修了期で推定/.test(html) && !/u-warn">卒業年月日/.test(html) &&
+    !/u-warn">在籍リストから外れた月/.test(html));
+  check("names are escaped", /&lt;b>/.test(cx._stuTrendDetailHtml({ joined: [{ id: '1', name: '<b>x', nat: '', start: '', src: '始業日' }], left: [] })));
+  check("a month with figures gets the clickable label; an empty month stays plain text",
+    /cur !== null\s*\n?\s*\? '<button type="button" class="fy-mo-btn"/.test(HTML) && /onclick="stuTrendDetail\(\\'' \+ escAttrJsStr\(ym\) \+ '\\'\)"/.test(HTML));
+  check("the detail modal comes AFTER the trend modal (stacks on top)", HTML.indexOf('id="stuTrendDetailModal"') > HTML.indexOf('id="stuTrendModal"'));
+  check("a month the dates cover is read-only in the table", /const editable = canEdit && !\(\(_stuTrend && _stuTrend\.series\) \|\| \{\}\)\[ym\];/.test(HTML) &&
+    /\(editable \? _stuTrendCell\(ym, 'total'/.test(HTML) && /\(editable \? _stuTrendCell\(ym, 'joined'/.test(HTML));
+  check("the pop-up scrolls (a long 出 list must not run off the screen)",
+    /id="stuTrendDetailModal"[^\n]*\n\s*<div class="modal-box" style="[^"]*max-height:85vh; overflow-y:auto;/.test(HTML));
+  const sx = vm.createContext({ escHtmlJs: (v) => String(v) });
+  vm.runInContext('var _stuTrend = null, _stuTrendEdits = {};\n' + ['_stuTrendDetailSummary', '_stuTrendSeries', '_stuTrendNum', '_stuPrevYm'].map(fnOf).join('\n'), sx);
+  sx._stuTrend = { series: { '2026-08': { total: 602, joined: 0, left: 1 }, '2026-09': { total: 576, joined: 0, left: 26 } }, rows: [] };
+  check("the pop-up states 在籍者数 and 前月差 from the table's own figures (576, 前月 602, −26)",
+    /在籍者数 576名（前月 602名）　前月差 -26/.test(sx._stuTrendDetailSummary('2026-09')), sx._stuTrendDetailSummary('2026-09'));
+  sx._stuTrend.rows = [{ month: '2026-09', total: 576, joined: 0, left: 26, typedIgnored: { total: 999, joined: 1 } }];
+  check("the pop-up says when a typed value was ignored", /手動入力（在籍 999名・入 1名）は、始業日・卒業年月日からの集計を優先して表示していません/.test(sx._stuTrendDetailSummary('2026-09')));
+}
+
+console.log("\n26. a 修了生 with no 卒業年月日: the app's monthly lists, else the 修了期 (2026-10-06)");
+{
+  const vm = require('vm');
+  const extract = (src, name) => {
+    const st = src.indexOf("\nfunction " + name + "(");
+    if (st < 0) throw new Error("missing " + name);
+    let i = src.indexOf("{", st), d = 0;
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === "/" && src[i + 1] === "/") { i = src.indexOf("\n", i); continue; }
+      if (c === '"' || c === "'" || c === "`") { for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++; continue; }
+      if (c === "/" && /[=(,:!&|?{};]\s*$/.test(src.slice(Math.max(0, i - 3), i))) {
+        for (i++; i < src.length && src[i] !== "/"; i++) { if (src[i] === "\\") i++; else if (src[i] === "[") { while (src[++i] !== "]") if (src[i] === "\\") i++; } }
+        continue;
+      }
+      if (c === "{") d++;
+      if (c === "}" && --d === 0) return src.slice(st + 1, i + 1);
+    }
+  };
+  const FN = ['getEnrollmentMonthDetail', '_enrolPeople_', '_readEnrolRosters_', '_enrolDatedSeries_', '_enrolYm_', '_enrolStartYm_', '_enrolDateCells_', '_intakeKeyFromStudentId_', '_enrolCohortEndYm_', '_enrolOutYm_', '_ymNorm_', '_ymAdd_'];
+  const PH = ['学籍番号', '国籍', '名前英語', '始業日', '修了期', '卒業年月日', '備考'];
+  const RH = ['年月', '連番', '学籍番号（カンマ区切り）', '人数', '記録日時'];
+  function make(code, past, roster) {
+    const ctx = vm.createContext({ _permOrLegacyRole_: () => true, _ymKey_: () => '2026-10', SHEET_ENROL_ROSTER: 'Enrollment_Roster',
+      SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: (n) => {
+        if (n !== 'Enrollment_Roster' || !roster) return null;
+        if (roster === 'throw') return { getDataRange: () => { throw new Error('x'); } };
+        return { getDataRange: () => ({ getDisplayValues: () => roster.map(r => r.map(String)) }) }; } }) },
+      _readTabs_: () => ({ Central_DB: [['学籍番号', '国名', '名前英語', '始業日']], Past_DB: past }) });
+    vm.runInContext(FN.map(n => extract(code, n)).join("\n"), ctx);
+    return ctx;
+  }
+  const past = [PH,
+    ['2025071135', 'ネパール', 'APRIL LEAVER', '2025/07/08', '2026.4~', '', ''],   // gone before the lists began
+    ['2025041001', 'ネパール', 'OCT LEAVER', '2025/04/08', '2026.4~', '', ''],     // on Sept's list, not Oct's
+    ['2025041002', 'ネパール', 'TODAY MOVE', '2025/04/08', '2026.4~', '', ''],     // on Oct's list: moved since last night
+    ['2024041003', 'ネパール', 'CLOSED', '2024/04/08', '2024.4~2025.3', '', ''],   // closed tab, on no list
+    ['2025041004', 'ネパール', 'DATED', '2025/04/08', '2026.4~', '2026/07/31', '']]; // a date beats the list
+  const roster = [RH, ['2026-09', '1', '2025041001,2025041002,2025041004', '3', ''], ['2026-10', '1', '2025041002', '1', '']];
+  const ctx = make(CODE, past, roster);
+  const people = ctx._enrolPeople_('2026-10').byId;
+  check("⚠️ 2025071135 (on no list, open tab) leaves in 2026-04 — not September", people['2025071135'].end === '2026-04' && /^修了期で推定（2026\.4~）/.test(people['2025071135'].endSrc), JSON.stringify(people['2025071135']));
+  check("on September's list, gone from October's → leaves 2026-10, by the app's record",
+    people['2025041001'].end === '2026-10' && people['2025041001'].endSrc === '在籍リストから外れた月' && people['2025041001'].est === false, JSON.stringify(people['2025041001']));
+  check("on THIS month's list (moved since last night) → leaves this month", people['2025041002'].end === '2026-10', JSON.stringify(people['2025041002']));
+  check("a closed tab on no list → the end of its range (unchanged)", people['2024041003'].end === '2025-03');
+  check("a 卒業年月日 always wins over the lists", people['2025041004'].end === '2026-07' && people['2025041004'].endSrc === '卒業年月日');
+  check("September's 出 no longer holds 2025071135", !ctx.getEnrollmentMonthDetail('2026-09').left.some(r => r.id === '2025071135') &&
+    ctx.getEnrollmentMonthDetail('2026-04').left.some(r => r.id === '2025071135'));
+  check("an unreadable list falls back to the 修了期 estimate, nothing thrown", (() => {
+    const c = make(CODE, past, 'throw'); const p = c._enrolPeople_('2026-10').byId; return p['2025041001'].end === '2026-04'; })());
+  const ser = ctx._enrolDatedSeries_('2026-10');
+  check("the lists still equal the series every month", Object.keys(ser.months).every(m => {
+    const x = ctx.getEnrollmentMonthDetail(m); return x.joined.length === ser.months[m].joined && x.left.length === ser.months[m].left; }));
+  const lastMonth = CODE.replace("end = pick(parts[1]) || pick(parts[0]);        // an open range ends at its own start", "end = pick(parts[1]);");
+  check("  mutation: the old open-tab \"last month\" puts 2025071135 back in September", lastMonth !== CODE && make(lastMonth, past, roster)._enrolPeople_('2026-10').byId['2025071135'].end === '2026-09');
+  const noLists = CODE.replace("if (!end && lastOnList[id]) {", "if (false) {");
+  check("  mutation: ignoring the lists puts the October leaver at April", noLists !== CODE && make(noLists, past, roster)._enrolPeople_('2026-10').byId['2025041001'].end === '2026-04');
+  check("在籍リストから外れた月, 始業日 and 学籍番号 are records, not estimates (no warning badge)",
+    /const STU_TREND_SURE_SRC = \['始業日', '学籍番号', '卒業年月日', '在籍リストから外れた月'\];/.test(HTML));
+  check("the note says how undated 修了生 are placed", /卒業年月日のない修了生は、2026年9月以降は在籍リストから外れた月で計上/.test(HTML));
+}
+
+const vm = require("vm");
+console.log("\n27. March leavers are enrolled in March (immigration's count, 2026-10-07)");
+{
+  const extract = function (src, name) {
+    const st = src.indexOf("function " + name + "(");
+    let i = src.indexOf("{", st), d = 0;
+    for (; i < src.length; i++) { const c = src[i];
+      if (c === '"' || c === "'" || c === "`") { for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++; continue; }
+      if (c === "/" && src[i + 1] === "/") { i = src.indexOf("\n", i); continue; }
+      if (c === "{") d++; if (c === "}" && --d === 0) return src.slice(st, i + 1); }
+  };
+  const FN = ['getEnrollmentHistory', 'getEnrollmentMonthDetail', '_enrolPeople_', '_readEnrolRosters_', '_enrolDatedSeries_', '_enrolYm_', '_enrolStartYm_', '_enrolDateCells_', '_intakeKeyFromStudentId_', '_enrolCohortEndYm_', '_enrolOutYm_', '_ymNorm_', '_ymAdd_'];
+  const CH = ['学籍番号', '国名', '名前英語', '始業日'], PH = ['学籍番号', '国籍', '名前英語', '始業日', '修了期', '卒業年月日'];
+  const central = [CH], past = [PH];
+  for (let i = 0; i < 10; i++) central.push(['20250400' + String(i).padStart(2, '0'), 'x', 'C' + i, '2025/04/08']);
+  for (let i = 0; i < 3; i++) past.push(['20240400' + String(i).padStart(2, '0'), 'x', 'M' + i, '2024/04/08', '2024.4~2026.3', '2026/03/' + (20 + i)]);
+  past.push(['2024040099', 'x', 'SEPT', '2024/04/08', '2024.4~2026.3', '2025/09/30']);
+  const mk = (code) => { const ctx = vm.createContext({ _permOrLegacyRole_: () => true, _hasPerm_: () => true, _ymKey_: () => '2026-10', Utilities: {},
+      SHEET_ENROL_HISTORY: 'Enrollment_History', ENROL_MANUAL: '手動', ENROL_RETURN_KIND: '復帰', SHEET_ENROL_ROSTER: 'Enrollment_Roster',
+      SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: () => null }) },
+      _readTabs_: () => ({ Central_DB: central, Past_DB: past }) });
+    vm.runInContext(FN.map(n => extract(code, n)).join("\n"), ctx); return ctx; };
+  const ctx = mk(CODE), ser = ctx.getEnrollmentHistory('', '').series;
+  check("⚠️ THE USER'S CASE: 3 students leaving in March 2026 are IN March's 在籍 (13), out in April (10)",
+    ser['2026-03'].total === 13 && ser['2026-03'].left === 0 && ser['2026-04'].total === 10 && ser['2026-04'].left === 3,
+    JSON.stringify([ser['2026-03'], ser['2026-04']]));
+  check("other months stay end-of-month: a September leaver is out of September itself",
+    ser['2025-09'].left === 1 && ser['2025-09'].total === ser['2025-08'].total - 1, JSON.stringify([ser['2025-08'], ser['2025-09']]));
+  const ks = Object.keys(ser).sort();
+  check("the identity still holds every month", ks.every((m, i) => i === 0 || ser[m].total === ser[ks[i - 1]].total + ser[m].joined - ser[m].left));
+  const apr = ctx.getEnrollmentMonthDetail('2026-04'), mar = ctx.getEnrollmentMonthDetail('2026-03');
+  check("the month list agrees: April lists the 3 (年月 still 2026-03), March lists none",
+    apr.left.length === 3 && apr.left.every(r => r.end === '2026-03') && mar.left.length === 0, JSON.stringify([apr.left, mar.left]));
+  const noRule = CODE.replace('return (end && end.slice(5, 7) === "03") ? _ymAdd_(end, 1) : end;', 'return end;');
+  check("  mutation: without the March rule the 3 drop out of March (10)",
+    noRule !== CODE && mk(noRule).getEnrollmentHistory('', '').series['2026-03'].total === 10);
+  check("the note states it", /3月に修了・退学した学生は入管の基準に合わせて3月の在籍に含め、出は4月に計上。/.test(HTML));
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

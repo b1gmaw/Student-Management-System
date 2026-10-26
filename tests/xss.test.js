@@ -48,9 +48,9 @@ const SAFE = [
   'actualColIdx', 'sheetRow', 'nc + 1', 'g.span', 'rowIndex',
   // counts and totals — numbers computed here, never strings from a sheet
   'occupied', 'vacant', 'docCount', 'rooms.length', 'orphanRooms.length',
-  'calTeachers.length', 'groups.length', 'totalGrand', 'grand', 'intakeSub',
-  'proj', 'groupColTotals[gi]', 'intakeColTotals[ai].courses[ci]',
-  'intakeColTotals[ai].sub', 'fmt(bldgRent)',
+  'calTeachers.length', 'groups.length', 'T.totalGrand', 'pc.grand', 'pc.intakeSubs[ai]',
+  'proj', 'T.groupColTotals[gi]', 'T.intakeColTotals[ai].courses[ci]',
+  'T.intakeColTotals[ai].sub', 'fmt(bldgRent)',
   // class names and inline styles this file chose
   'cls', 'cellClass', 'bl', 'align', 'accent', 'icon', 'ownColBg', 'cursorStyle',
   'linkArea', 'clickable', 'colLabel', 'key', 'type', 'h',
@@ -58,6 +58,14 @@ const SAFE = [
   'docChipHtml', 'addRoomBtnHtml', 'bulkPdfBtnHtml', 'editBtnHtml', 'bIdAttr',
   // renderDormSyncReport: each room label went through escHtmlJs on the line above
   'roomListHtml',
+  // shinseiPlacementTipEl: built from the STATIC SHINSEI_PLACEMENT_CEFR table, and every cell and
+  // attribute in it went through escHtmlJs / escAttrJs. Named specifically so this exemption can
+  // never cover a generic `rows` carrying sheet data.
+  'cefrTipRows',
+  // shinseiExamTipEl: same shape — built from the STATIC SHINSEI_EXAMS list, every cell and
+  // attribute through escHtmlJs / escAttrJs, including the tier heading (a ternary between two
+  // literals). Named specifically, for the same reason cefrTipRows is.
+  'examTipRows',
   // _dormSyncChipHtml: a ternary between two literals, and a coerced number
   'syncChipLabel', 'Number(rep.updated) || 0',
   // renderPastInterviewsTable: irCls() is a ternary between the literal
@@ -100,7 +108,7 @@ const SAFE = [
   // Helpers that escape internally — checked: numCell() wraps escHtmlJs(co),
   // cellOpen() wraps escAttrJs(cohort)/escAttrJs(cat), td() emits a bare <td>,
   // and the .map() calls iterate over literal header arrays:
-  'numCell()', 'cellOpen()', 'td()', 'withPct()', 'rows.map()', 'list.map()',
+  'numCell()', 'cellOpen()', 'td()', 'rows.map()', 'list.map()',
   // The 3-argument row() helper in アカウント: every caller passes esc(...).
   'row()', 'k', 'v',
   // _expPdf's local esc(), and the .map()s around it, which call it per cell.
@@ -266,7 +274,7 @@ console.log("\n5. the sinks that actually carry sheet data are escaped, by name"
     ['the ユーザー管理 email column', /u\.email \? ' · ' \+ escHtmlJs\(u\.email\) : ''/],
     ['the ユーザー管理 id', /<div class='u-sub'>\$\{escHtmlJs\(u\.id\)\}/],
     ['the ユーザー管理 role', /<td>\$\{escHtmlJs\(displayRole\)\}/],
-    ['the ユーザー管理 last-seen date', /最終操作 " \+ escHtmlJs\(String\(ses\.lastSeen/],
+    ['the ユーザー管理 last-seen date', /最終操作 " \+ escHtmlJs\(formatDateDisplay\(String\(ses\.lastSeen/],
     ['the building header', /<h3[^`]*\$\{escHtmlJs\(displayName\)\}/],
     ['the building id button arguments', /openEditBldgModal\(event, '\$\{bIdAttr\}'\)/],
     ['the room list', /<div class="rr-num">\$\{escHtmlJs\(room\.roomNumber\)\}<\/div>/],

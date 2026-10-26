@@ -334,7 +334,7 @@ console.log("\n8. withdrawActiveRequest — one withdrawal, whatever the request
   // sheet copy — the 3×/day triggerScheduledBackup covers Schedule_DB. It must still log.
   check("it logs, and takes no per-save copy", !/_snapshotSheet_/.test(wBody) &&
     /active\.label \+ "リクエストを取り下げ"/.test(wBody), "");
-  // ⚠️ rejectBookerDateChange mails the teacher because the 担当 decided. Here the
+  // ⚠️ _rejectBookerDateChange_ mails the teacher because the 担当 decided. Here the
   // teacher IS the actor, so a mail would be telling them what they just did.
   check("it does NOT mail the teacher",
     wBody.indexOf('_notifyTeacherDateChangeResult_') === -1, "");
@@ -491,6 +491,73 @@ console.log("\n11. a slot carrying a request is never toggled away");
   });
   check("an Available slot still toggles", routeTeacherClick('Available') === 'toggle',
     "the guard must not swallow ordinary availability edits");
+}
+
+console.log("\n12. only the teacher a 交代 was sent to can accept or decline it");
+{
+  // ⚠️ accept/decline took toTeacherId from the BROWSER with only "some session exists" as the
+  // guard, so any signed-in account could answer a request addressed to someone else. Fixed
+  // 2026-09-28: the id comes from the session, and the session must be a literal teacher — staff and
+  // teacher ids share no namespace, so staff 5 must not answer teacher 5's request.
+  // These run the REAL functions from Code.js in a vm, on a fake Schedule_DB.
+  const vm = require('vm');
+  const fn = function (src, name) {
+    const i = src.indexOf('\nfunction ' + name + '(');
+    if (i < 0) throw new Error('Code.js: no function ' + name);
+    const s = i + 1, eol = src.indexOf('\n', s), first = src.slice(s, eol);
+    const o = (first.match(/\{/g) || []).length, c = (first.match(/\}/g) || []).length;
+    return (o && o === c) ? first : src.slice(s, src.indexOf('\n}\n', s) + 2);
+  };
+  // Schedule_DB columns used here: 3 date, 4 period, 5 status, 12 the 交代 target teacher.
+  const PENDING = ['ts', 'T1', '', '2026-10-01', '10:00 ~ 10:30', 'Reassign_Pending', '学生', '', '', '', '', '担当', '5', '', '', ''];
+  function run(src, name, session, argTeacher) {
+    const writes = [];
+    const rows = [new Array(16).fill('h'), PENDING.slice()];
+    const sheet = {
+      getDataRange: function () { return { getDisplayValues: function () { return rows; } }; },
+      getRange: function (r, c) { return { setValue: function (v) { writes.push([r, c, v]); },
+                                           setValues: function (v) { writes.push([r, c, v]); } }; },
+    };
+    const ctx = vm.createContext({
+      _authUser: session,
+      SpreadsheetApp: { getActiveSpreadsheet: function () { return { getSheetByName: function () { return sheet; } }; } },
+      _notifyReassignResult_: function () {},
+    });
+    ['_sessionDeadError_', '_requireSession_', '_reassignResponderId_', '_findPendingReassign_', name]
+      .forEach(function (n) { vm.runInContext(fn(src, n), ctx); });
+    let err = null;
+    try { ctx[name](argTeacher, '2026-10-01', '10:00 ~ 10:30'); } catch (e) { err = e.message; }
+    return { err: err, writes: writes.length };
+  }
+  const TARGET = { role: 'teacher', id: '5', name: '五郎' };
+  const OTHER  = { role: 'teacher', id: '6', name: '六子' };
+  const STAFF5 = { role: 'sales',   id: '5', name: '営業五' };
+
+  const ok = run(CODE, 'declineReassignment', TARGET, '5');
+  check("the teacher it was sent to can decline it", ok.err === null && ok.writes > 0, JSON.stringify(ok));
+  const spoof = run(CODE, 'declineReassignment', OTHER, '5');
+  check("⚠️ another teacher claiming the target's id is refused, and nothing is written",
+    spoof.err !== null && spoof.writes === 0, JSON.stringify(spoof));
+  const staff = run(CODE, 'declineReassignment', STAFF5, '5');
+  check("⚠️ staff with the SAME id is refused — teacher and staff ids share no namespace",
+    /依頼先の先生のみ/.test(staff.err || '') && staff.writes === 0, JSON.stringify(staff));
+  const anon = run(CODE, 'declineReassignment', null, '5');
+  check("no session is the session-dead error, nothing written",
+    /再度ログインしてください/.test(anon.err || '') && anon.writes === 0, JSON.stringify(anon));
+  // accept refuses at the same two points, before any of its heavier dependencies are reached.
+  ['acceptReassignment'].forEach(function (n) {
+    const a = run(CODE, n, OTHER, '5'), b = run(CODE, n, STAFF5, '5');
+    check("⚠️ " + n + " refuses another teacher and same-id staff too, writing nothing",
+      a.err !== null && a.writes === 0 && /依頼先の先生のみ/.test(b.err || '') && b.writes === 0,
+      JSON.stringify([a, b]));
+  });
+
+  // Mutation: the old shape — the browser's id believed.
+  const old = CODE.split('  toTeacherId = _reassignResponderId_(me);\n').join('');
+  check("  mutation anchor found in both functions", (CODE.split('toTeacherId = _reassignResponderId_(me);').length - 1) === 2, "");
+  const m1 = run(old, 'declineReassignment', OTHER, '5'), m2 = run(old, 'declineReassignment', STAFF5, '5');
+  check("  mutation: trusting the browser's id lets another teacher and same-id staff decline — caught",
+    m1.err === null && m1.writes > 0 && m2.err === null && m2.writes > 0, JSON.stringify([m1, m2]));
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

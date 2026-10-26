@@ -22,8 +22,9 @@ function check(n, c, d) {
   else { fail++; console.log("  FAIL  " + n + "\n        " + d); }
 }
 
-// Mirrors BUILDING_COLS in Code.js.
-const BUILDING_COLS = 49;
+// Mirrors BUILDING_COLS in Code.js — and §8 binds the mirror to the source, so a column added
+// to Code.js alone fails here instead of passing against a stale copy.
+const BUILDING_COLS = 55;
 
 // Mirrors the existingRow[N] assignments in updateBuilding. Value is the index.
 // docIds(44) is deliberately absent — see below.
@@ -44,6 +45,8 @@ const WRITE = {
   bicycle1Caption: 40, bicycle2Caption: 41, bicycle3Caption: 42,
   otherBill: 43, hotWaterBill: 45, rentDefault: 46,
   garbageBurnablePlastic: 47, garbageBurnablePlasticBag: 48,
+  misc1Id: 49, misc2Id: 50, misc3Id: 51,
+  misc1Caption: 52, misc2Caption: 53, misc3Caption: 54,
 };
 
 // Mirrors the bldgData[i][N] reads in _getBuildingDataForPdf_. Index 0 is the id
@@ -67,6 +70,8 @@ const READ = {
   bicycle1Caption: 40, bicycle2Caption: 41, bicycle3Caption: 42,
   otherBill: 43, docIds: 44, hotWaterBill: 45, rentDefault: 46,
   garbageBurnablePlastic: 47, garbageBurnablePlasticBag: 48,
+  misc1Id: 49, misc2Id: 50, misc3Id: 51,
+  misc1Caption: 52, misc2Caption: 53, misc3Caption: 54,
 };
 
 // The five garbage categories, as the PDF template renders them.
@@ -335,6 +340,113 @@ console.log("\n別紙一覧: the selection highlights the WHOLE row");
     /const GENERAL_DOC_ID = '__GENERAL__';/.test(HTML) &&
     /const GENERAL_DOC_ID = '__GENERAL__';/.test(SRC),
     "these two strings must stay identical or uploads land nowhere");
+}
+
+console.log("\n7. save and update share ONE photo uploader and ONE combineLang");
+{
+  // Until 2026-09-28 saveBuilding and updateBuilding each carried a nested combineLang (identical to
+  // the global _combineLang_) and a nested uploadPhoto (update's keeping the existing id). One copy
+  // of each now. The helper runs for real here, against a fake Drive folder.
+  const vm = require('vm');
+  const body = function (name) {
+    const a = SRC.indexOf('\nfunction ' + name + '(');
+    return a < 0 ? '' : SRC.slice(a, SRC.indexOf('\n}\n', a + 1));
+  };
+  const save = body('saveBuilding'), upd = body('updateBuilding');
+  check("neither function carries a nested combineLang or uploadPhoto any more",
+    save.length > 500 && upd.length > 500
+      && !/const combineLang =|function uploadPhoto\(/.test(save) && !/const combineLang =|function uploadPhoto\(/.test(upd), "");
+  const calls = function (b) { return (b.match(/_uploadBuildingPhoto_\(photoFolder, formObject\.bldgId, /g) || []).length; };
+  check("each uploads its thirteen photos through the shared helper", calls(save) === 13 && calls(upd) === 13,
+    calls(save) + " / " + calls(upd));
+  check("update passes each photo's existing id; save passes none",
+    (upd.match(/formObject\.existing[A-Z]\w*Id\)/g) || []).length === 13 && !/formObject\.existing/.test(save), "");
+
+  const load = function (src) {
+    const i = src.indexOf('\nfunction _uploadBuildingPhoto_(');
+    const code = src.slice(i + 1, src.indexOf('\n}\n', i + 1) + 2);
+    const created = [];
+    const ctx = vm.createContext({
+      Utilities: { base64Decode: function (b) { return b; }, newBlob: function (bytes, mime, name) { return { name: name }; } },
+    });
+    vm.runInContext(code, ctx);
+    const folder = { createFile: function (blob) { created.push(blob.name); return { getId: function () { return 'NEW:' + blob.name; } }; } };
+    return { fn: ctx._uploadBuildingPhoto_, folder: folder, created: created };
+  };
+  const H = load(SRC);
+  check("a new photo is uploaded, named <bldgId>_<suffix>.jpg, and its id returned",
+    H.fn(H.folder, 'B01', { base64: 'x', mimeType: 'image/jpeg' }, 'WM_1', 'OLD') === 'NEW:B01_WM_1.jpg', "");
+  check("⚠️ with no new photo, an edit keeps the existing id", H.fn(H.folder, 'B01', null, 'WM_1', 'OLD') === 'OLD', "");
+  check("...and a new building gets ''", H.fn(H.folder, 'B01', null, 'WM_1') === '' && H.fn(H.folder, 'B01', {}, 'X', undefined) === '', "");
+  check("...and nothing is uploaded when there is no photo", H.created.length === 1, JSON.stringify(H.created));
+  // Mutation: save's old copy (no existing-id fallback) used for both — an edit would wipe photos.
+  const M = load(SRC.replace('  return existingId || "";\n}', '  return "";\n}'));
+  check("  mutation: dropping the existing-id fallback (edit wipes a photo) is caught",
+    M.fn(M.folder, 'B01', null, 'WM_1', 'OLD') !== 'OLD', "");
+}
+
+console.log("\n8. the maps above are the SOURCE's maps, and the その他 photo group (2026-10-01)");
+{
+  // Until 2026-10-01 WRITE / READ / BUILDING_COLS were transcriptions with nothing binding them to
+  // Code.js, so a column added on one side only would have passed here. Derived now, both ways.
+  const vm = require('vm');
+  const body = function (name) {
+    const a = SRC.indexOf('\nfunction ' + name + '(');
+    return a < 0 ? '' : SRC.slice(a, SRC.indexOf('\n}\n', a + 1));
+  };
+  const srcCols = Number((SRC.match(/^const BUILDING_COLS = (\d+);/m) || [])[1]);
+  check("the BUILDING_COLS mirror equals Code.js's", srcCols === BUILDING_COLS, srcCols + " vs " + BUILDING_COLS);
+  const set = (arr) => Array.from(new Set(arr)).sort((a, b) => a - b).join(',');
+  const writes = set((body('updateBuilding').match(/existingRow\[(\d+)\]\s*=/g) || []).map(m => Number(m.match(/\d+/)[0])));
+  const reads = set((body('_getBuildingDataForPdf_').match(/bldgData\[i\]\[(\d+)\]/g) || []).map(m => Number(m.match(/\[(\d+)\]$/)[1])));
+  check("WRITE's indices are exactly updateBuilding's assignments", writes === set(Object.values(WRITE)),
+    "source " + writes + "\n        map    " + set(Object.values(WRITE)));
+  check("READ's indices are exactly _getBuildingDataForPdf_'s reads", reads === set(Object.values(READ)),
+    "source " + reads + "\n        map    " + set(Object.values(READ)));
+
+  // saveBuilding appends a positional row: its length must reach the last index too.
+  const save = body('saveBuilding');
+  check("save and update upload the three その他 photos as Misc_1..3",
+    ['Misc_1', 'Misc_2', 'Misc_3'].every(n => save.indexOf('"' + n + '"') !== -1 && body('updateBuilding').indexOf('"' + n + '"') !== -1));
+  check("update keeps each その他 photo's existing id",
+    [1, 2, 3].every(n => body('updateBuilding').indexOf('formObject.existingMisc' + n + 'Id)') !== -1));
+
+  // ⚠️ The header writer is load-bearing: the batched read is as wide as the header row, so a blank
+  // header at 49–54 hides the その他 ids from the 編集 modal, and the next save writes "" over them.
+  const hdrSrc = (SRC.match(/const BUILDING_ADDED_HEADERS = \{[\s\S]*?\};/) || [''])[0];
+  const run = function (fnSrc, header) {
+    const writesTo = {};
+    const sheet = {
+      getMaxColumns: () => header.length, insertColumnsAfter: (a, n) => { for (let i = 0; i < n; i++) header.push(''); },
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => [header.slice(c - 1, c - 1 + nc)],
+        setValue: (v) => { writesTo[c - 1] = v; header[c - 1] = v; },
+      }),
+    };
+    const ctx = vm.createContext({});
+    vm.runInContext('var BUILDING_COLS = ' + BUILDING_COLS + ';\n' + hdrSrc.replace(/^const /, 'var ') + '\n' + fnSrc, ctx);
+    ctx._ensureBuildingColumns_(sheet);
+    return writesTo;
+  };
+  const ensure = (SRC.match(/\nfunction _ensureBuildingColumns_\([\s\S]*?\n}\n/) || [''])[0];
+  const old = new Array(49).fill('h'); old[52 - 3] = undefined;      // a 49-wide sheet, as before
+  const w = run(ensure, old.slice());
+  check("a 49-wide sheet gets all six その他 headers", [49, 50, 51, 52, 53, 54].every(i => typeof w[i] === 'string' && w[i] !== ''),
+    JSON.stringify(w));
+  check("...and nothing else in the header row is written", Object.keys(w).every(k => Number(k) >= 49));
+  const typed = new Array(55).fill('h'); typed[50] = '手入力の見出し';
+  const w2 = run(ensure, typed);
+  check("⚠️ a header someone typed is never overwritten", !(50 in w2) && typed[50] === '手入力の見出し', JSON.stringify(w2));
+  const clobber = ensure.replace(/if \(String\(header\[idx\][^\n]*\n\s*(sheet\.getRange\(1, idx \+ 1\)\.setValue\(BUILDING_ADDED_HEADERS\[k\]\);)\n\s*\}/, '$1');
+  check("  mutation: writing unconditionally would overwrite it (proves the check can fail)",
+    clobber !== ensure && (50 in run(clobber, (() => { const t = new Array(55).fill('h'); t[50] = 'x'; return t; })())));
+
+  // The gallery: 12 photos must stay within the 3 rows the single page has room for.
+  const roomHtml = body('_buildRoomHtmlInner_');
+  check("the gallery lists the three その他 photos", (roomHtml.match(/title: "その他 \/ Other", id: bldgData\.misc\dId/g) || []).length === 3);
+  check("4 per row only past 9 photos", /const PER_ROW = totalCount > 9 \? 4 : 3;/.test(roomHtml) && /widthByRowCount = \{[^}]*4: 23/.test(roomHtml));
+  const rows = (n) => Math.ceil(n / (n > 9 ? 4 : 3));
+  check("rows: 9 photos → 3 (unchanged), 10–12 → 3, never 4", rows(9) === 3 && rows(10) === 3 && rows(12) === 3 && [1,2,3,4,5,6,7,8,9].every(n => rows(n) === Math.ceil(n / 3)));
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

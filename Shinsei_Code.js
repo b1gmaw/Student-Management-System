@@ -1,10 +1,7 @@
 // ==========================================
-// 1. SETUP & WEB APP UI
-// ==========================================
-// ==========================================
-// SHINSEI (申請関連) BACKEND
-// All functions prefixed shinsei_ to avoid collisions with main Code.gs
-// doGet is handled by the main app's Code.gs
+// SHINSEI (申請関連) BACKEND — 各種確認書: the form's data, PDF export and preview.
+// doGet lives in Code.js. Endpoints here are named shinsei_*, and private helpers
+// _shinsei…_ (a trailing _ is what keeps a helper off google.script.run).
 // ==========================================
 
 // ⚠️ THE POSITIONAL CONTRACT for Shinsei_Data. Every column is anonymous — the form's
@@ -36,8 +33,17 @@ const SHINSEI_INTAKE_COL = 47;
 const SHINSEI_FIXED_EXAMS = 2;
 const SHINSEI_FIXED_EDUS = 3;
 
+// 電話番号 1/2/3回目, as 1-based column numbers. Written as TEXT, always: left to Sheets, a
+// digits-only 0751234567 is stored as the number 751234567, and a +81 number is read as a
+// formula by appendRow — +81 75 123 4567 shows #ERROR!, and +977-1-4412345 silently becomes
+// -4411369. Measured with probeSheetsTextInput on staging, 2026-09-15.
+// ⚠️ tests/shinseicols.test.js §13 derives this list from the form's 電話番号 fields, so a
+// fourth phone column cannot be added to the form without landing here too.
+const SHINSEI_TEXT_COLS = [17, 25, 41];
+
 function shinsei_getStudentNames() {
   _requireSession_("shinsei_getStudentNames");
+  _requireShinseiPerm_("view_shinsei");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const dataSheet = ss.getSheetByName("Shinsei_Data") || ss.getSheetByName("Data");
   if (!dataSheet) throw new Error("シートが見つかりません。'Shinsei_Data' という名前のシートを作成してください。");
@@ -82,8 +88,34 @@ function shinsei_getStudentNames() {
 // ==========================================
 // 2. DATA ENTRY & EDITING FUNCTIONS
 // ==========================================
+
+// Prefixes ' onto the phone columns so Sheets stores exactly what was typed (SHINSEI_TEXT_COLS).
+// map(), so the positional contract cannot move a value.
+// ⚠️ Applied INSIDE _cellSafeRow_: the guard leaves a value that starts with ' alone, so a +81
+// number gets one apostrophe, never two. The apostrophe is Sheets' text marker, not part of the
+// value — getValues() reads back what was typed.
+function _shinseiForceText_(row) {
+  return row.map(function (v, i) {
+    if (SHINSEI_TEXT_COLS.indexOf(i + 1) === -1) return v;
+    if (v === null || v === undefined || v === "") return v;
+    const s = String(v);
+    return s.charAt(0) === "'" ? s : "'" + s;
+  });
+}
+
+// A formula cell's text, back as it was typed. MEASURED (probeSheetsTextInput, 2026-09-15):
+// appendRow stores a typed "+81 75 123 4567" as a formula whose text is exactly that, with no =
+// added, so it comes back unchanged. A formula that does begin "=+" / "=-" drops the = and becomes
+// the phone it spells. Every other formula keeps its = — an injected =IMPORTXML(…) comes back as
+// that text, and _cellSafe_ then stores it inert.
+function _shinseiRecoverFormulaText_(f) {
+  const s = String(f == null ? "" : f);
+  return /^=[+\-＋－]/.test(s) ? s.slice(1) : s;
+}
+
 function shinsei_saveNewStudent(formDataArray) {
   _requireSession_("shinsei_saveNewStudent");
+  _requireShinseiPerm_("edit_shinsei");
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(10000)) throw new Error("Database is busy. Please try again.");
   
@@ -100,7 +132,8 @@ function shinsei_saveNewStudent(formDataArray) {
     // ⚠️ _cellSafeRow_ wraps the ARRAY at the write site, never the fields inside it —
     // the positional contract is the worse bug class. A 備考 of =IMPORTXML(...) runs the
     // next time anyone opens the workbook; this module had no guard at all until now.
-    sheet.appendRow(_cellSafeRow_(newRow));
+    // The phone columns are forced to text inside it — see SHINSEI_TEXT_COLS.
+    sheet.appendRow(_cellSafeRow_(_shinseiForceText_(newRow)));
     return (formDataArray[1] || "Student") + " のデータを保存しました！";
   } catch (error) {
     throw new Error(error.toString());
@@ -111,6 +144,7 @@ function shinsei_saveNewStudent(formDataArray) {
 
 function shinsei_deleteStudent(studentName) {
   _requireSession_("shinsei_deleteStudent");
+  _requireShinseiPerm_("edit_shinsei");
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(10000)) throw new Error("Database is busy. Please try again.");
   try {
@@ -134,6 +168,7 @@ function shinsei_deleteStudent(studentName) {
 
 function shinsei_getStudentDataForEdit(studentName) {
   _requireSession_("shinsei_getStudentDataForEdit");
+  _requireShinseiPerm_("view_shinsei");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName("Shinsei_Data") || ss.getSheetByName("Data");
   if (!sheet) throw new Error("Shinsei_Data シートが見つかりません。");
@@ -142,7 +177,14 @@ function shinsei_getStudentDataForEdit(studentName) {
   for (let r = 1; r < data.length; r++) { 
     if (String(data[r][0]).trim() === String(studentName).trim()) { // Check Col A
       let rowData = data[r];
+      // ⚠️ getValues() hands a broken formula cell back as the TEXT "#ERROR!" — or, for a typed
+      // +977-1-4412345, as the number it evaluated to. Loaded into the form like that, the next
+      // データ更新 wrote it over the cell, and the formula was the only copy of what was typed:
+      // that is how saves made AFTER the formula guard still showed #ERROR!. A formula cell is
+      // returned as its recovered text instead, so saving the record repairs it. One row only.
+      const formulas = sheet.getRange(r + 1, 1, 1, rowData.length).getFormulas()[0];
       for (let i = 0; i < rowData.length; i++) {
+        if (formulas[i]) { rowData[i] = _shinseiRecoverFormulaText_(formulas[i]); continue; }
         if (rowData[i] instanceof Date) {
           const d = rowData[i];
           const year = d.getFullYear();
@@ -164,6 +206,7 @@ function shinsei_getStudentDataForEdit(studentName) {
 
 function shinsei_updateExistingStudent(originalName, formDataArray) {
   _requireSession_("shinsei_updateExistingStudent");
+  _requireShinseiPerm_("edit_shinsei");
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(10000)) throw new Error("Database busy. Please try again.");
   
@@ -187,7 +230,7 @@ function shinsei_updateExistingStudent(originalName, formDataArray) {
     }
     
     // ⚠️ Same guard as the insert path above — free text, same sheet, same hole.
-    sheet.getRange(targetRow, 1, 1, SHINSEI_COLS).setValues([_cellSafeRow_(valuesToSet)]); // Write starting at Column A (1)
+    sheet.getRange(targetRow, 1, 1, SHINSEI_COLS).setValues([_cellSafeRow_(_shinseiForceText_(valuesToSet))]); // Write starting at Column A (1)
     return "✅ " + (formDataArray[1] || "Student") + " のデータを更新しました！";
   } catch(e) {
     throw new Error(e.toString());
@@ -370,16 +413,291 @@ function _shinseiDataSheet_() {
   return sheet;
 }
 
+// Editor-run, READ-ONLY. Lists every Shinsei_Data cell that is not what was typed:
+//   (a) a FORMULA. The typed text is still inside it; migrateShinseiFormulaCells restores it.
+//   (b) literal error TEXT (#ERROR!) with no formula: a broken record re-saved before 既存編集
+//       recovered formulas. The typed text is gone from this sheet, so the newest backup copy
+//       still holding a real value for that student is printed, to be restored by hand.
+//   (c) a NUMBER in a phone column: its leading zero is gone and is not guessed back.
+// ⚠️ It reads the backup file's id from the property and never calls _getBackupSpreadsheet_,
+// which CREATES a backup file when none is recorded. This runs on production before anything else.
+function diagnoseShinseiFormulaCells() {
+  _requireMaintenanceUnlock_("diagnoseShinseiFormulaCells");
+  const sheet = _shinseiDataSheet_();
+  const range = sheet.getDataRange();
+  const V = range.getValues(), F = range.getFormulas();
+  if (V.length <= 1) return "Shinsei_Data has no rows.";
+  const ERR = /^#(ERROR!|NAME\?|VALUE!|REF!|DIV\/0!|N\/A|NUM!|NULL!)$/;
+  const head = V[0];
+  const label = function (c) { return "列" + (c + 1) + (head[c] ? "（" + head[c] + "）" : ""); };
+  const who = function (r) { return "行" + (r + 1) + " " + V[r][0]; };
+  const codes = function (s) {
+    return String(s).slice(0, 4).split("").map(function (ch) {
+      return "U+" + ("000" + ch.charCodeAt(0).toString(16).toUpperCase()).slice(-4);
+    }).join(" ");
+  };
+
+  const formulas = [], errors = [], numbers = [];
+  for (let r = 1; r < V.length; r++) {
+    for (let c = 0; c < V[r].length; c++) {
+      if (F[r][c]) {
+        formulas.push(who(r) + " / " + label(c) + ": " + JSON.stringify(F[r][c]) + " [" + codes(F[r][c]) + "]"
+          + " → " + JSON.stringify(_shinseiRecoverFormulaText_(F[r][c])));
+      } else if (typeof V[r][c] === "string" && ERR.test(V[r][c].trim())) {
+        errors.push({ r: r, c: c });
+      } else if (typeof V[r][c] === "number" && SHINSEI_TEXT_COLS.indexOf(c + 1) !== -1) {
+        numbers.push(who(r) + " / " + label(c) + ": " + V[r][c]);
+      }
+    }
+  }
+
+  // Backup copies are named "<sheet>__yyyyMMdd_HHmmss", so newest-first is a name sort. Each tab
+  // is read at most once however many cells need it.
+  let tabs = null;
+  const cache = {};
+  const fromBackup = function (name, c) {
+    if (tabs === null) {
+      tabs = [];
+      const id = PropertiesService.getScriptProperties().getProperty(BACKUP_PROP_KEY);
+      if (id) {
+        try {
+          const prefix = sheet.getName() + "__";
+          tabs = SpreadsheetApp.openById(id).getSheets()
+            .filter(function (t) { return t.getName().indexOf(prefix) === 0; })
+            .sort(function (x, y) { return x.getName() < y.getName() ? 1 : -1; });
+        } catch (e) { tabs = []; }
+      }
+    }
+    if (!tabs.length) return "no backup copies found";
+    const want = _normName_(name);
+    for (let t = 0; t < tabs.length; t++) {
+      const tn = tabs[t].getName();
+      if (!cache[tn]) { const rg = tabs[t].getDataRange(); cache[tn] = { V: rg.getValues(), F: rg.getFormulas() }; }
+      const b = cache[tn];
+      for (let r = 1; r < b.V.length; r++) {
+        if (_normName_(b.V[r][0]) !== want) continue;
+        if (b.F[r] && b.F[r][c]) return tn + ": formula → " + JSON.stringify(_shinseiRecoverFormulaText_(b.F[r][c]));
+        const v = b.V[r][c];
+        if (v !== "" && v != null && !(typeof v === "string" && ERR.test(v.trim()))) return tn + ": " + JSON.stringify(v);
+        break;
+      }
+    }
+    return "no backup copy holds a value for this cell";
+  };
+  const errLines = errors.map(function (e) {
+    return who(e.r) + " / " + label(e.c) + ": " + V[e.r][e.c] + "  ← " + fromBackup(V[e.r][0], e.c);
+  });
+
+  const indent = function (s) { return "  " + s; };
+  const report = []
+    .concat(["(a) formula cells: " + formulas.length + " — migrateShinseiFormulaCells restores these"], formulas.map(indent), [""])
+    .concat(["(b) error text saved as text: " + errLines.length + " — restore by hand from the backup value shown"], errLines.map(indent), [""])
+    .concat(["(c) phone columns holding a number: " + numbers.length + " — the leading zero cannot be recovered"], numbers.map(indent))
+    .join("\n");
+  console.log(report);
+  return report;
+}
+
+// Editor-run one-off. Rewrites every formula cell in Shinsei_Data as the text that was typed —
+// kind (a) above — through the same two guards a save uses. Kinds (b) and (c) are left alone:
+// nothing in this sheet can restore them.
+// ⚠️ Under the document lock, so a データ更新 cannot land between the read and the rewrite. And it
+// refuses to write when the sheet copy was not taken: _snapshotSheet_ swallows its own errors
+// and reports them only through its return value.
+function migrateShinseiFormulaCells() {
+  _requireMaintenanceUnlock_("migrateShinseiFormulaCells");
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30000)) throw new Error("Database is busy. Please try again.");
+  try {
+    const sheet = _shinseiDataSheet_();
+    const F = sheet.getDataRange().getFormulas();
+    const hits = [];
+    for (let r = 1; r < F.length; r++) {
+      for (let c = 0; c < F[r].length; c++) {
+        if (F[r][c]) hits.push({ r: r, c: c, f: F[r][c] });
+      }
+    }
+    if (!hits.length) return "nothing to do — " + sheet.getName() + " holds no formula cells.";
+    if (!_snapshotSheet_(sheet.getName())) {
+      throw new Error("The backup copy of " + sheet.getName() + " failed, so nothing was changed.");
+    }
+    // A whole positional row per cell, so _shinseiForceText_ sees the column the cell is in.
+    const width = Math.max(SHINSEI_COLS, F[0].length);
+    const done = [];
+    hits.forEach(function (h) {
+      const one = new Array(width).fill("");
+      one[h.c] = _shinseiRecoverFormulaText_(h.f);
+      const safe = _cellSafeRow_(_shinseiForceText_(one))[h.c];
+      sheet.getRange(h.r + 1, h.c + 1).setValue(safe);
+      done.push("行" + (h.r + 1) + " 列" + (h.c + 1) + ": " + h.f);
+    });
+    SpreadsheetApp.flush();
+    _logActivity_({ role: "master", name: "システム", id: "SYSTEM" }, "申請データの数式を修復", sheet.getName(),
+      done.join(" / ").slice(0, 45000));
+    return "repaired " + hits.length + " cell(s) in " + sheet.getName() + ":\n" + done.join("\n");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ── 試験名 の改称（2026-09-18） ──────────────────────────────────────────────────────────────
+// 試験名's option list became the 13 tests 出入国在留管理庁 publishes, written 正式名称（略称）.
+// Seven older spellings therefore no longer appear in the dropdown.
+//
+// Nothing was lost: a stored value absent from a <select>'s options is CARRIED as its own option
+// and flagged red (shinseiSelectSetValue), which is why this is a tidy-up and not a rescue. But
+// every affected record shows a red 試験名 until somebody re-picks it, and the old spelling would
+// go back onto the COE form on the next データ更新 — so the stored values are moved instead.
+//
+// ⚠️ This map must stay in step with SHINSEI_EXAMS in Index.html. Its VALUES are the new names;
+// tests/shinseicols.test.js §15 reads both files and asserts every value here exists there, and
+// that no key here is still offered — so a rename on one side alone fails the suite.
+const SHINSEI_EXAM_RENAMES = {
+  "NAT-TEST": "日本語NAT-TEST",
+  "J-TEST": "実用日本語検定（J.TEST）",
+  "J-CERT": "生活・職能日本語検定（J-cert）",
+  "JPT": "JPT日本語能力試験",
+  "TOP-J": "実用日本語運用能力試験（TOPJ）",
+  "BJT": "ビジネス日本語能力テスト（BJT）",
+  "JFT": "国際交流基金日本語基礎テスト（JFT-Basic）"
+};
+// The 1-based columns holding a 試験名 (1回目 / 2回目).
+// ⚠️ Column 48's JSON blob holds MORE of them — exams[].name on every 3回目以降 block — and a
+// migration that fixed only these two would leave the added blocks on the old spelling, which is
+// precisely the half nobody scrolls down to look at.
+const SHINSEI_EXAM_NAME_COLS = [3, 8];
+
+// Reads every stored 試験名 and reports the DISTINCT values with their counts, marking the ones
+// migrateShinseiExamNames would move. Read-only; run this first.
+// ⚠️ It deliberately does NOT carry a copy of the 13 accepted names. Listing the distinct values
+// is what lets a human spot anything unexpected — a hand-typed or imported spelling that is in
+// neither the old list nor the new one — without this file growing a second copy of a vocabulary
+// that already lives in Index.html and drifts the moment the school accepts another test.
+function diagnoseShinseiExamNames() {
+  _requireMaintenanceUnlock_("diagnoseShinseiExamNames");
+  const sheet = _shinseiDataSheet_();
+  const V = sheet.getDataRange().getValues();
+  if (V.length <= 1) return "Shinsei_Data has no rows.";
+
+  const seen = {};           // name → { fixed, extra, rows: [] }
+  const bump = function (name, where, r) {
+    const k = String(name == null ? "" : name).trim();
+    if (k === "") return;
+    if (!seen[k]) seen[k] = { fixed: 0, extra: 0, rows: [] };
+    seen[k][where]++;
+    if (seen[k].rows.length < 6) seen[k].rows.push("行" + (r + 1) + " " + V[r][0]);
+  };
+
+  let bad = 0;
+  for (let r = 1; r < V.length; r++) {
+    SHINSEI_EXAM_NAME_COLS.forEach(function (col) { bump(V[r][col - 1], "fixed", r); });
+    const raw = V[r][SHINSEI_COLS - 1];
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      (parsed && parsed.exams ? parsed.exams : []).forEach(function (x) { bump(x && x.name, "extra", r); });
+    } catch (e) { bad++; }   // a malformed blob costs that row's extras, never the report
+  }
+
+  const names = Object.keys(seen).sort();
+  if (!names.length) return "no 試験名 is stored in " + sheet.getName() + ".";
+  let willMove = 0;
+  const lines = names.map(function (n) {
+    const s = seen[n], to = SHINSEI_EXAM_RENAMES[n];
+    if (to) willMove += s.fixed + s.extra;
+    return (to ? "CHANGE " : "keep   ") + JSON.stringify(n) +
+      (to ? " → " + JSON.stringify(to) : "") +
+      "  [固定 " + s.fixed + " / 追加ブロック " + s.extra + "]" +
+      "  " + s.rows.join(", ") + (s.fixed + s.extra > s.rows.length ? " …" : "");
+  });
+  return "distinct 試験名 in " + sheet.getName() + " — " + willMove + " value(s) would be rewritten" +
+    (bad ? " (⚠️ " + bad + " row(s) have an unreadable extras blob and were skipped)" : "") +
+    ":\n" + lines.join("\n") +
+    "\n\nAnything on a `keep` line that is not one of the 13 current options was typed or imported " +
+    "by hand — it stays flagged red in 各種確認書 until someone re-picks it.";
+}
+
+// Rewrites the stored 試験名 values named in SHINSEI_EXAM_RENAMES, in both the fixed columns and
+// the extras blob. Run diagnoseShinseiExamNames first.
+// ⚠️ Under the document lock, so a データ更新 cannot land between the read and the rewrite; and it
+// refuses to write when the sheet copy was not taken — _snapshotSheet_ swallows its own errors and
+// reports them only through its return value.
+function migrateShinseiExamNames() {
+  _requireMaintenanceUnlock_("migrateShinseiExamNames");
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30000)) throw new Error("Database is busy. Please try again.");
+  try {
+    const sheet = _shinseiDataSheet_();
+    const V = sheet.getDataRange().getValues();
+    const cells = [];        // { r, c, to }   1-based row / column
+    const blobs = [];        // { r, json }
+    for (let r = 1; r < V.length; r++) {
+      SHINSEI_EXAM_NAME_COLS.forEach(function (col) {
+        const to = SHINSEI_EXAM_RENAMES[String(V[r][col - 1] == null ? "" : V[r][col - 1]).trim()];
+        if (to) cells.push({ r: r + 1, c: col, to: to, from: V[r][col - 1] });
+      });
+      const raw = V[r][SHINSEI_COLS - 1];
+      if (!raw) continue;
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch (e) { continue; }
+      let touched = 0;
+      (parsed && parsed.exams ? parsed.exams : []).forEach(function (x) {
+        const to = x && SHINSEI_EXAM_RENAMES[String(x.name == null ? "" : x.name).trim()];
+        if (to) { x.name = to; touched++; }
+      });
+      if (touched) blobs.push({ r: r + 1, json: JSON.stringify(parsed), n: touched });
+    }
+    if (!cells.length && !blobs.length) return "nothing to do — no old 試験名 spelling is stored in " + sheet.getName() + ".";
+    if (!_snapshotSheet_(sheet.getName())) {
+      throw new Error("The backup copy of " + sheet.getName() + " failed, so nothing was changed.");
+    }
+
+    const done = [];
+    // ⚠️ Written through the same guard a save uses. No 試験名 starts with = + or -, so this
+    // changes nothing today — but writing user-visible text to a sheet unwrapped is the hole this
+    // module already had once, and a write site that skips it is how the next one starts.
+    const width = Math.max(SHINSEI_COLS, V[0].length);
+    const safeAt = function (value, col) {
+      const one = new Array(width).fill("");
+      one[col - 1] = value;
+      return _cellSafeRow_(_shinseiForceText_(one))[col - 1];
+    };
+    cells.forEach(function (h) {
+      sheet.getRange(h.r, h.c).setValue(safeAt(h.to, h.c));
+      done.push("行" + h.r + " 列" + h.c + ": " + h.from + " → " + h.to);
+    });
+    blobs.forEach(function (b) {
+      sheet.getRange(b.r, SHINSEI_COLS).setValue(safeAt(b.json, SHINSEI_COLS));
+      done.push("行" + b.r + " 追加ブロック " + b.n + "件");
+    });
+    SpreadsheetApp.flush();
+    _logActivity_({ role: "master", name: "システム", id: "SYSTEM" }, "申請データの試験名を改称", sheet.getName(),
+      done.join(" / ").slice(0, 45000));
+    return "renamed " + cells.length + " cell(s) and " + blobs.length + " extras blob(s) in " +
+      sheet.getName() + ":\n" + done.join("\n");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ⚠️ export_shinsei, decided on the SERVER. Until 2026-09-15 it lived only on the three client
 // buttons (プレビュー / この学生を出力 / 一括出力), so any signed-in account could call these from the
 // console and export every student's documents.
-// _hasPerm_ is given no role and no permissions ON PURPOSE: while enforcing, both come from the
+// _hasPerm_ is given no role and no permissions ON PURPOSE: both come from the
 // session, so master and admin-level pass exactly as the buttons show them (hasPermission grants
-// admin-level on the client too). _requirePerm_ would refuse an admin-level caller the button
-// offers, because it reads the permission string literally.
+// admin-level on the client too). A check that read the permission string literally would refuse
+// an admin-level caller the button offers (the deleted _requirePerm_ did exactly that).
 function _requireShinseiExport_() {
-  if (!_authEnforcing_()) return;   // observe mode only logs, like every session guard
   if (!_hasPerm_("", "", "export_shinsei")) throw new Error("権限がありません");
+}
+
+// ⚠️ view_shinsei / edit_shinsei, decided on the SERVER for the same reason as export above.
+// Until 2026-10-26 the five data endpoints asked only _requireSession_, which proves somebody is
+// signed in, not that they may see these records: a 教務 (no view_shinsei) could read every
+// applicant's passport and phone fields from the console, and delete records by name.
+// Called AFTER _requireSession_, so a dead session still signs the browser out.
+function _requireShinseiPerm_(perm) {
+  if (!_hasPerm_("", "", perm)) throw new Error("権限がありません");
 }
 
 function shinsei_exportSingleFromWebApp(studentName, includeCefr = true) {

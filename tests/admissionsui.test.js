@@ -170,19 +170,29 @@ console.log("\n5. chips on both sub-tabs, one level below プレースメント'
   check("...while the intake row stays underlined tabs", fn(HTML, 'loadPlacementDashboard').indexOf('btn.className = "sub-nav-btn"') > 0, "");
 }
 
-console.log("\n6. the two リンク管理 list copies stay identical");
+console.log("\n6. the リンク管理 rows have ONE renderer");
 {
+  // ⚠️ Until 2026-09-28 renderPlacementConfigList carried a full second copy of the row markup and
+  // wiring, and this section's only job was to catch the two drifting apart. They are one renderer
+  // now: the fetch hands off to rerenderPlacementConfigRows. So the pin is "exactly once".
   const s = js(HTML);
   const rows = s.match(/<button type="button" class='schedule-btn btn-xs pcfg-[^\n]*<\/button>/g) || [];
   const kinds = {};
   rows.forEach(function (r) { kinds[r] = (kinds[r] || 0) + 1; });
-  check("five buttons, each emitted exactly twice with byte-identical markup",
-    rows.length === 10 && Object.keys(kinds).length === 5 && Object.keys(kinds).every(function (k) { return kinds[k] === 2; }),
-    JSON.stringify(kinds));
-  const drifted = s.replace("class='schedule-btn btn-xs pcfg-del' data-idx='${idx}'", "class='schedule-btn btn-xs pcfg-del' data-idx='${idx}' style='background:#e74a3b;'");
-  const r2 = drifted.match(/<button type="button" class='schedule-btn btn-xs pcfg-[^\n]*<\/button>/g) || [];
-  const k2 = {}; r2.forEach(function (r) { k2[r] = (k2[r] || 0) + 1; });
-  check("  mutation: recolouring ONE copy fails it", Object.keys(k2).length !== 5, JSON.stringify(k2));
+  check("five buttons, each emitted exactly ONCE",
+    rows.length === 5 && Object.keys(kinds).length === 5, JSON.stringify(kinds));
+  const fetchFn = s.slice(s.indexOf('function renderPlacementConfigList('), s.indexOf('function renderPlacementConfigList(') + 900);
+  check("the fetch hands off to the one renderer and builds no markup of its own",
+    /placementConfigCache = rows \|\| \[\];\s*rerenderPlacementConfigRows\(\);/.test(fetchFn) && fetchFn.indexOf('pcfg-') === -1, "");
+  const render = s.slice(s.indexOf('function rerenderPlacementConfigRows('), s.indexOf('function rerenderPlacementConfigRows(') + 1200);
+  check("...and the renderer carries the empty-list message the copy used to own",
+    /placementConfigCache\.length === 0\) \{ listEl\.innerHTML = "[^"]*まだ登録がありません。/.test(render), "");
+  // Mutation: a second copy of one button re-appears — on its own line, as the deleted copy was
+  // (the match runs to the end of a line, so two buttons on ONE line would count once).
+  const dup = s.replace("<button type=\"button\" class='schedule-btn btn-xs pcfg-del' data-idx='${idx}'>削除</button>",
+    "<button type=\"button\" class='schedule-btn btn-xs pcfg-del' data-idx='${idx}'>削除</button>\n<button type=\"button\" class='schedule-btn btn-xs pcfg-del' data-idx='${idx}'>削除</button>");
+  const r2 = dup.match(/<button type="button" class='schedule-btn btn-xs pcfg-[^\n]*<\/button>/g) || [];
+  check("  mutation: a second copy of a row button is caught", dup !== s && r2.length !== 5, String(r2.length));
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

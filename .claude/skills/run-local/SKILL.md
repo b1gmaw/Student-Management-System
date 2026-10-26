@@ -95,7 +95,7 @@ screenshots it writes are ordinary files on disk.
 ## Test
 
 ```bash
-./tests/run-all.sh          # 43 suites, plain Node, no framework
+./tests/run-all.sh          # 64 suites, plain Node, no framework
 node tests/mobile.test.js   # one suite
 ```
 

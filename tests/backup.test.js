@@ -86,6 +86,8 @@ console.log("\n1. the scheduled job copies what CHANGED, never tokens or the aud
         _snapshotSheet_: function (n) { if ((opts.failing || []).indexOf(n) !== -1) return false; st.copies.push(n); return true; },
         _backupCellCount_: function () { return opts.cells || 12000; },
         _logActivity_: function (a, act, t, d) { st.logs.push([act, t, d]); },
+        // The real trigger passes; tests/authz.test.js §4 covers who is refused.
+        _requireTriggerOrUnlock_: function () {},
       });
       st.cache = {};                                  // the next run is a later trigger
       const r = ctx.triggerScheduledBackup();
@@ -138,8 +140,9 @@ console.log("\n1. the scheduled job copies what CHANGED, never tokens or the aud
   const sb = sandbox(CONSTS.concat([codeFn('_sheetDigest_'), JOB, 'var _authUser = null;']), {
     CacheService: { getScriptCache: function () { return { get: function () { return '1'; }, put: function () {} }; } },
     _snapshotSheet_: function () { throttledCopies.push('X'); return true; },
+    _requireTriggerOrUnlock_: function () {},
   });
-  check("⚠️ a call inside the window is THROTTLED, not run (it is web-callable)",
+  check("⚠️ a call inside the window is THROTTLED, not run (a second bound behind the trigger gate)",
     sb.triggerScheduledBackup() === 'throttled' && throttledCopies.length === 0, "");
 
   const boom = project({ Schedule_DB: [['a']] }, { explode: true });
@@ -180,9 +183,9 @@ console.log("\n3. who may still copy — derived from the source, both ways");
 {
   // ⚠️ The allowlist of immediate copies. Anything else calling _snapshotSheet_ fails here, so a
   // routine save cannot quietly start paying ~1.5s again — and a kept one cannot lose its copy.
-  const KEPT = ['restoreSnapshot', 'migrateAddPasswordColumns', 'reorderPlacementConfig', 'importResultsFromBookings',
-    'removeRecruitmentMeta', '_recMaterialiseLegacyCountries_', 'migrateOtherVisaAddDesiredColumn', 'profileApp',
-    'saveSimulationData', 'migrateBuildingAddBurnablePlastic', 'deleteBuilding', 'saveEnrollmentMonths',
+  const KEPT = ['restoreSnapshot', 'reorderPlacementConfig', '_importResultsFromBookingsLocked_',
+    'removeRecruitmentMeta', '_recMaterialiseLegacyCountries_', 'profileApp',
+    'saveSimulationData', 'deleteBuilding', 'saveEnrollmentMonths',
     'syncDormsFromCentralDB', 'triggerScheduledBackup'];
   const re = /^function ([A-Za-z_]\w*)\s*\(/gm;
   const starts = []; let m;

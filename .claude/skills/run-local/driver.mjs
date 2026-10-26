@@ -130,6 +130,14 @@ function makeInitScript(fixtures, dark) {
                   // ⚠️ Set window.__pwResetFail = true to make the reset FAIL. The case worth
                   // reaching is save-succeeded-but-reset-failed: the new user EXISTS and cannot
                   // log in, and the editor must say exactly that rather than show success.
+                  // ⚠️ Both answer FROM __gradRows, filtered like the server does. A static list
+                  // would show the same students for every cell and every query, so neither the
+                  // drill-down nor the search would prove anything locally.
+                  if (name === 'getDestinationDetail') {
+                    const co = String(cargs[2] || ''), cat = String(cargs[3] || '');
+                    v = { cohort: co, category: cat, rows: (FIX.__gradRows || []).filter((r) =>
+                      (co === '' || r.cohort === co) && (cat === '' || r.category === cat)) };
+                  }
                   if (name === 'adminResetPassword') {
                     if (window.__pwResetFail) throw new Error('テスト用の失敗');
                     v = { tempPassword: 'k7Q-3fPm-92x' };
@@ -206,20 +214,21 @@ const FIXTURES = {
   //
   // Shape matters: initStudentTable reads data.current as an array-of-arrays with a
   // HEADER ROW, and _studentFilterColumns builds one filter control per column it
-  // recognises — 国名 / コース / ビザの種類 / ビザ警告. Without those four headers the
-  // filter bar is never built and 在籍学生 renders as just the search box, which is
-  // why layout bugs in that row were invisible here.
+  // recognises — 国名 / コース / クラス / 性別 / ビザの種類 / ビザ警告. 性別 is spelled
+  // several ways on purpose (男 / 男性 / M, 女 / F, one blank): the filter must collapse them.
+  // Without those headers the filter bar is never built and 在籍学生 renders as just the
+  // search box, which is why layout bugs in that row were invisible here.
   getDashboardData: {
     current: [
-      ['学籍番号', '名前', '国名', '名前英語', 'クラス', 'コース', 'ビザの種類', 'ビザ警告', '寮'],
-      ['202601001', 'サンプル 一郎', 'ネパール', 'Sample Ichiro', 'A1', '進学2年', '留学', '', 'テスト寮101'],
-      ['202601002', 'サンプル 二郎', 'ベトナム', 'Sample Jiro', 'A1', '進学2年', '留学', '要確認', 'テスト寮102'],
-      ['202601003', 'サンプル 三郎', 'ミャンマー', 'Sample Saburo', 'B2', '進学1.5年', '家族滞在', '', ''],
-      ['202601004', 'サンプル 四郎', 'ネパール', 'Sample Shiro', 'B2', '進学1.5年', '留学', '', 'テスト寮201'],
-      ['202601005', 'サンプル 五子', 'スリランカ', 'Sample Goko', 'C1', '一般2年', '留学', '要確認', ''],
-      ['202601006', 'サンプル 六子', 'ベトナム', 'Sample Rokuko', 'C1', '一般2年', '特定活動', '', 'テスト寮202'],
-      ['202601007', 'サンプル 七子', 'インドネシア', 'Sample Nanako', 'A2', '進学2年', '留学', '', ''],
-      ['202601008', 'サンプル 八郎', 'ミャンマー', 'Sample Hachiro', 'A2', '進学2年', '留学', '', 'テスト寮203'],
+      ['学籍番号', '名前', '国名', '名前英語', 'クラス', '性別', 'コース', 'ビザの種類', 'ビザ警告', '寮'],
+      ['202601001', 'サンプル 一郎', 'ネパール', 'Sample Ichiro', 'A1', '男', '進学2年', '留学', '', 'テスト寮101'],
+      ['202601002', 'サンプル 二郎', 'ベトナム', 'Sample Jiro', 'A1', '男性', '進学2年', '留学', '要確認', 'テスト寮102'],
+      ['202601003', 'サンプル 三郎', 'ミャンマー', 'Sample Saburo', 'B2', 'M', '進学1.5年', '家族滞在', '', ''],
+      ['202601004', 'サンプル 四郎', 'ネパール', 'Sample Shiro', 'B2', '男', '進学1.5年', '留学', '', 'テスト寮201'],
+      ['202601005', 'サンプル 五子', 'スリランカ', 'Sample Goko', 'C1', '女', '一般2年', '留学', '要確認', ''],
+      ['202601006', 'サンプル 六子', 'ベトナム', 'Sample Rokuko', 'C1', 'F', '一般2年', '特定活動', '', 'テスト寮202'],
+      ['202601007', 'サンプル 七子', 'インドネシア', 'Sample Nanako', 'A2', '', '進学2年', '留学', '', ''],
+      ['202601008', 'サンプル 八郎', 'ミャンマー', 'Sample Hachiro', 'A2', '男', '進学2年', '留学', '', 'テスト寮203'],
     ],
     past: [], headers: [],
   },
@@ -238,11 +247,113 @@ const FIXTURES = {
     { type: 'announcement', id: 'A1', body: '9月18日（金）15時から職員会議を行います。\n資料は共有フォルダの「会議」に置いてあります。出席できない方は前日までに連絡してください。', by: 'サンプル 管理者', at: '2026-09-12 09:30:00' },
     { type: 'announcement', id: 'A2', body: '10月生の面接枠を増やしました。', by: 'サンプル 管理者', at: '2026-09-10 17:05:00' },
   ],
+  // ⚠️ `state` is deliberately uneven: a booking carrying a 交代 or キャンセル request is still a
+  // live interview and is listed with a badge. With every row plain, that half never renders.
   getUpcomingForUser: [
-    { type: 'interview', date: '2026-09-15', period: '10:00 ~ 10:30', student: 'サンプル 学生D', nationality: 'ネパール', course: '進学2年課程', teacherName: 'サンプル 三郎', link: '' },
-    { type: 'interview', date: '2026-09-16', period: '13:00 ~ 13:30', student: 'サンプル 学生E', nationality: 'ベトナム', course: '就職2年課程', teacherName: 'サンプル 一美', link: '' },
-    { type: 'interview', date: '2026-09-18', period: '09:00 ~ 09:30', student: '', nationality: '', course: '', teacherName: 'サンプル 七郎', link: '' },
+    { type: 'interview', date: '2026-09-15', period: '10:00 ~ 10:30', student: 'サンプル 学生D', nationality: 'ネパール', course: '進学2年課程', teacherName: 'サンプル 三郎', link: '', state: '' },
+    { type: 'interview', date: '2026-09-16', period: '13:00 ~ 13:30', student: 'サンプル 学生E', nationality: 'ベトナム', course: '就職2年課程', teacherName: 'サンプル 一美', link: '', state: 'reassign' },
+    { type: 'interview', date: '2026-09-17', period: '11:00 ~ 11:30', student: 'サンプル 学生F', nationality: 'ミャンマー', course: '進学2年課程', teacherName: 'サンプル 三郎', link: '', state: 'cancelreq' },
+    { type: 'interview', date: '2026-09-18', period: '09:00 ~ 09:30', student: '', nationality: '', course: '', teacherName: 'サンプル 七郎', link: '', state: '' },
   ],
+  // 修了・卒業生進路. ⚠️ Without these the tab renders an empty table and a screenshot proves
+  // nothing. The summary carries 未分類 on purpose: it is the DEFAULT panel, so a fixture with
+  // none leaves half the screen unseen. __gradRows feeds getDestinationDetail (filtered in the stub
+  // below), and 修了生検索 filters those same rows in the browser — one list, so the drill-down and
+  // the search cannot disagree about who exists.
+  // ⚠️ `nick` is what the search matches when 名前英語 is set; give at least one row a nickname that
+  // does NOT appear in its name, or the nickname path is never exercised locally.
+  __gradRows: [
+    { sid: 'G1001', cohort: '2025.4~2026.3', nationality: 'ネパール', nick: 'BIKASH', name: 'SAMPLE ARYAL BIKASH', course: '進学1年6か月課程', destination: 'サンプル国際大学', prefecture: '大阪府', industry: '', category: '進学' },
+    { sid: 'G1002', cohort: '2025.4~2026.3', nationality: 'ベトナム', nick: 'MINH', name: 'SAMPLE TRAN MINH', course: '進学1年6か月課程', destination: '株式会社サンプル物流', prefecture: '愛知県', industry: '運輸', category: '就職' },
+    { sid: 'G1003', cohort: '2025.4~2026.3', nationality: 'ミャンマー', nick: 'HTET', name: 'SAMPLE AUNG HTET', course: '日本語・文化2年課程', destination: '帰国', prefecture: '', industry: '', category: '帰国' },
+    { sid: 'G1004', cohort: '2025.4~2026.3', nationality: 'ネパール', nick: 'SITA', name: 'SAMPLE GURUNG SITA', course: '進学1年6か月課程', destination: '就職決まらなければ帰国', prefecture: '', industry: '', category: '未分類' },
+    { sid: 'G1005', cohort: '2024.4~2025.3', nationality: 'スリランカ', nick: 'NUWAN', name: 'SAMPLE PERERA NUWAN', course: '日本語・文化2年課程', destination: 'サンプル専門学校（ホテル）', prefecture: '本町府', industry: '', category: '進学' },
+    { sid: 'G1006', cohort: '2024.4~2025.3', nationality: '中国', nick: 'WEI', name: 'SAMPLE LI WEI', course: '進学1年6か月課程', destination: '特定活動(就職活動)', prefecture: '東本町', industry: '', category: 'その他' },
+    { sid: 'G1007', cohort: '2024.4~2025.3', nationality: 'ベトナム', nick: 'LAN', name: 'SAMPLE NGUYEN LAN', course: '進学1年6か月課程', destination: '延長', prefecture: '', industry: '', category: '在籍継続' },
+    { sid: 'G1008', cohort: '2024.3まで', nationality: 'モンゴル', nick: 'ERDENE', name: 'SAMPLE BAT ERDENE', course: '日本語・文化2年課程', destination: '退学', prefecture: '', industry: '', category: '退学・除籍' },
+    { sid: 'G1009', cohort: '2024.3まで', nationality: 'ネパール', nick: 'ラメシュ', name: 'SAMPLE THAPA RAMESH', course: '進学1年6か月課程', destination: '', prefecture: '', industry: '', category: '未入力' },
+  ],
+  getDestinationReport: {
+    categories: ['進学', '就職', '帰国', '在籍継続', '退学・除籍', 'その他'],
+    total: 9,
+    cohorts: [
+      { cohort: '2025.4~2026.3', counts: { 進学: 1, 就職: 1, 帰国: 1, 在籍継続: 0, '退学・除籍': 0, その他: 0 },
+        pct: { 進学: 33.3, 就職: 33.3, 帰国: 33.3, 在籍継続: 0, '退学・除籍': 0, その他: 0 },
+        known: 3, unentered: 0, unclassified: 1, rows: 4 },
+      { cohort: '2024.4~2025.3', counts: { 進学: 1, 就職: 0, 帰国: 0, 在籍継続: 1, '退学・除籍': 0, その他: 1 },
+        pct: { 進学: 33.3, 就職: 0, 帰国: 0, 在籍継続: 33.3, '退学・除籍': 0, その他: 33.3 },
+        known: 3, unentered: 0, unclassified: 0, rows: 3 },
+      { cohort: '2024.3まで', counts: { 進学: 0, 就職: 0, 帰国: 0, 在籍継続: 0, '退学・除籍': 1, その他: 0 },
+        pct: { 進学: 0, 就職: 0, 帰国: 0, 在籍継続: 0, '退学・除籍': 100, その他: 0 },
+        known: 1, unentered: 1, unclassified: 0, rows: 2 },
+    ],
+    unclassified: [{ value: '就職決まらなければ帰国', count: 1 }],
+  },
+  getPastStudentDetail: {
+    fields: [
+      { label: '学籍番号', value: 'G1001' }, { label: 'ニックネーム', value: 'BIKASH' },
+      { label: '国籍', value: 'ネパール' }, { label: '名前英語', value: 'SAMPLE ARYAL BIKASH' },
+      { label: 'コース', value: '進学1年6か月課程' }, { label: '修了期', value: '2025.4~2026.3' },
+      { label: '決定進路', value: 'サンプル国際大学' }, { label: '都道府県', value: '大阪府' },
+    ],
+  },
+  // 建物の編集 (openEditBldgModal). Row positions are Building_Info's: 21–23 / 24–26 / 29–31
+  // are the photo ids, 32 the exterior, 34–42 the captions. ⚠️ Mixed on purpose so every
+  // .file-box state shows at once: an exterior photo, 洗濯機 1 stored, ゴミ 1–2 stored, and
+  // 自転車 1 with a caption but NO photo — that slot opens and must read 未登録, not 登録済み.
+  getSpecificBuilding: {
+    rowIndex: 3,
+    data: (function () {
+      const d = new Array(55).fill('');
+      d[0] = 'B012'; d[1] = '学生会館 第二アネックス'; d[2] = 'Annex II';
+      d[32] = 'FAKE_EXTERIOR'; d[21] = 'FAKE_WM1'; d[24] = 'FAKE_G1'; d[25] = 'FAKE_G2';
+      d[40] = 'Bicycle parking\n駐輪場';
+      d[49] = 'FAKE_MISC1'; d[52] = 'Notice board\n掲示板';   // その他 slot 1 (2026-10-01)
+      return d;
+    })(),
+  },
+  // Names for the .file-box 「✓ 登録済み: name」, keyed by the ref the client sent. FAKE_G2 is
+  // left OUT on purpose: a photo uploaded before 2026-09-29 has no name worth showing, and
+  // its box must read plain 「✓ 登録済み」. U1 is the booking fixture used with --call.
+  // 入学予定者 (学生一覧). Two intakes, one cancelled, one 要確認 (two applicants share a key), so
+  // every badge and both filters are reachable. Rows are 面接結果 rows; meta travels in parallel.
+  getIncomingStudents: (function () {
+    const H = ['Timestamp', '日付', '入学期', '課程', '国籍', '名前', '性別', '年齢', '学歴', '現在のレベル', '点数',
+      'プレースメントテスト点数', '合否', '面接者', '担当', '申請', '2回目面接', '3回目面接', '備考', 'EnteredBy'];
+    const row = (st, intake, course, nat, name, sex, tanto) => {
+      const r = new Array(H.length).fill(''); r[0] = st; r[2] = intake; r[3] = course; r[4] = nat; r[5] = name;
+      r[6] = sex; r[12] = '合格'; r[14] = tanto; r[15] = '○'; return r;
+    };
+    const rows = [
+      row('2026/04/01 10:00', '2026年10月生', '進学2年', 'ネパール', 'SAMPLE TARO', '男', '営業 花子'),
+      row('2026/04/02 10:00', '2026年10月生', '進学1年6か月', 'ベトナム', 'SAMPLE HANAKO', '女', '営業 次郎'),
+      row('2026/04/03 10:00', '2026年10月生', '進学2年', 'ミャンマー', 'SAMPLE AUNG', '男', '営業 花子'),
+      row('2026/04/04 10:00', '2027年4月生', '進学2年', 'スリランカ', 'SAMPLE PERERA', '女', '営業 次郎'),
+      row('2026/04/05 10:00', '2027年4月生', '就職2年', 'ネパール', 'SAMPLE TWIN', '男', '営業 花子'),
+      row('2026/04/06 10:00', '2027年4月生', '就職2年', 'ネパール', 'SAMPLE TWIN', '男', '営業 花子'),
+      row('2026/04/07 10:00', '2026年10月生', '進学2年', 'ネパール', 'SAMPLE VISA', '女', '営業 花子'),
+    ];
+    // Every state: 申請中 (2026年10月生 is past its 申請日), 書類準備中, a cancellation, a cancellation that
+    // ALSO matches 在籍学生 (要確認, select enabled), and the ambiguous pair (要確認, select locked).
+    // 2026年10月生 is past its 結果日 (yesterday, so the 7-day banner shows): its undecided rows are
+    // 入学予定 automatically. Row 2 is 不交付, row 1 申請取り下げ, row 3 a decision on someone enrolled,
+    // and row 6 ビザ変更 (a 留学ビザ以外 row, which outranks the automatic 入学予定).
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const today = iso(new Date()), yest = iso(new Date(Date.now() - 86400000));
+    const meta = rows.map((r, i) => ({ sheetRow: i + 2, stamp: r[0],
+      decided: i === 1 ? '申請取り下げ' : i === 2 ? '不交付' : i === 3 ? 'COE後キャンセル' : null,
+      conflict: i === 4 || i === 5, enrolledToo: i === 3, visa: i === 6, applied: r[2] === '2026年10月生', planned: r[2] === '2026年10月生' }));
+    rows[2][5] = 'NGUYỄN VĂN AN';   // accented: the search must find it typed as 'nguyen'
+    return { headers: H, rows, meta, hiddenEnrolled: { '2026年10月生': 2 }, hiddenPast: { '2026年10月生': 1 },
+             applyDates: { '2026年10月生': '2026-08-01' }, resultDates: { '2026年10月生': yest }, today };
+  })(),
+  setIncomingState: { state: '不交付' },
+  updateIncomingStudent: { saved: true },
+  getStoredFileNames: {
+    FAKE_EXTERIOR: '外観_正面.jpg', FAKE_WM1: 'IMG_0412.jpg', FAKE_G1: 'ゴミ置き場_2026.jpg',
+    U1: 'ヒアリングシート_サンプル.pdf',
+    FAKE_MISC1: '掲示板.jpg',
+  },
   getDormData: {
     buildings: [
       { id: 'B012', nameJp: '学生会館 第二アネックス', nameEn: 'Annex II',
@@ -642,11 +753,6 @@ const FIXTURES = {
     snapshots: ['Staff_Master__20260911_104207', 'Staff_Master__20260910_081500',
                 'Recruitment_Meta__20260911_090551', 'Announcements__20260911_162013'],
   },
-  diagnoseInChargeMatching: {
-    summary: '3 件の担当名が一致、1 件が不一致（通知・メールが届かない可能性）',
-    unmatched: [{ value: 'サンプル一郎', bookings: 2 }],
-    matched: [{ value: 'サンプル 一郎', bookings: 14 }, { value: 'サンプル 二子', bookings: 6 }, { value: 'サンプル 三郎', bookings: 3 }],
-  },
   // ⚠️ Newest-first, as the server sorts — and S01 has TWO sessions, the older one last.
   // With one session per user the client's old `m[key] = r` looked correct: it kept the
   // LAST row, i.e. the oldest, and that is how 最終操作 showed a May date in production.
@@ -666,6 +772,30 @@ const FIXTURES = {
       { sid: '99aa88bb77cc66dd', started: '2026-08-29 12:02:50', lastSeen: '2026-09-01 10:11:23', seenAt: 1, current: false, device: '', deviceId: '' },
     ],
   },
+  // 学生数. Mirrors _liveReportDataUncached_ (Code.js): 国名 / 在籍数 / % and then one
+  // "<年> <月生>\n<コース>" column per intake × course, with 合計 as the LAST row; the summary is
+  // コース × ビザ × 合計. ⚠️ renderReportTables splits the pivot header on its FIRST space into
+  // 年 and the rest, so keep that space. Rows and columns add up (125), so a total that
+  // disagrees on screen is a rendering bug, not the fixture.
+  getLiveReportData: {
+    totalCountries: 6,
+    mainTable: [
+      ['国名', '在籍数', '%', '2026年 4月生\n進学1年6か月', '2026年 4月生\n日本語・文化2年', '2025年 10月生\n進学1年6か月', '2025年 10月生\n日本語・文化2年'],
+      ['ネパール', 47, '37.60%', 12, 9, 15, 11],
+      ['ベトナム', 31, '24.80%', 8, 6, 10, 7],
+      ['ミャンマー', 22, '17.60%', 5, 4, 8, 5],
+      ['スリランカ', 16, '12.80%', 4, 3, 6, 3],
+      ['中国', 6, '4.80%', 2, 1, 2, 1],
+      ['モンゴル', 3, '2.40%', 1, 0, 2, 0],
+      ['合計', 125, '100.00%', 32, 23, 43, 27],
+    ],
+    summaryTable: [
+      ['コース', '留学', '家族滞在', '合計'],
+      ['進学1年6か月', 71, 4, 75],
+      ['日本語・文化2年', 47, 3, 50],
+      ['合計', 118, 7, 125],
+    ],
+  },
   signOutMySession: { signedOut: 1 },
   signOutMyOtherSessions: { signedOut: 2 },
   getActiveSessions: [
@@ -679,7 +809,33 @@ const FIXTURES = {
     { role: 'teacher', id: 'T01', name: 'サンプル 三郎', pwStatus: '設定済み', email: 'c@example.jp', notif: 'ON', permissions: 'view_teacher_schedule', adminUser: true },
     { role: 'admin',   id: 'S09', name: 'サンプル 九子', pwStatus: '未設定',   email: 'd@example.jp', notif: 'ON', permissions: 'manage_users', adminUser: false },
   ],
-  getEnrollmentHistory: { rows: [], canEdit: true, today: '2026-08' },
+  // 増減推移's month detail: September as reported — 26 dated graduates plus ONE estimated student
+  // listed on both sides (the odd one the screen exists to name).
+  getEnrollmentMonthDetail: {
+    ym: '2026-09',
+    joined: [{ id: '202609001', name: 'SAMPLE ODD', nat: 'ベトナム', start: '2026-09', end: '2026-09', src: '学籍番号' }],
+    left: [{ id: '202609001', name: 'SAMPLE ODD', nat: 'ベトナム', start: '2026-09', end: '2026-09', src: '修了期で推定（2026.4~）' }]
+      .concat(Array.from({ length: 3 }, (_, i) => ({ id: '20240400' + (i + 1), name: 'SAMPLE GRAD ' + (i + 1), nat: 'ネパール', start: '2024-04', end: '2026-09', src: '卒業年月日' }))) },
+  // 増減推移, rebuilt from 始業日 / 卒業年月日: rows for the window, `series` back to the first 始業日
+  // (so 「＋ 前年度」 shows computed older years). 2026-09: 602 − 26 = 576, the reported case.
+  getEnrollmentHistory: (function () {
+    const series = {}, rows = [];
+    let run = 560;
+    const ym = (y, m) => y + '-' + String(m).padStart(2, '0');
+    for (let y = 2021, m = 4; ym(y, m) <= '2026-08'; m === 12 ? (y++, m = 1) : m++) {
+      const k = ym(y, m), j = m === 4 || m === 10 ? 40 : 1, l = m === 3 || m === 9 ? 30 : 1;
+      run += j - l; series[k] = { total: run, joined: j, left: l };
+    }
+    series['2026-08'] = { total: 602, joined: 3, left: 1 };
+    series['2026-09'] = { total: 576, joined: 0, left: 26 };
+    series['2026-10'] = { total: 610, joined: 36, left: 2 };
+    Object.keys(series).filter(k => k >= '2023-04').forEach(k => {
+      const p = series[Object.keys(series)[Object.keys(series).indexOf(k) - 1]];
+      rows.push({ month: k, total: series[k].total, joined: series[k].joined, left: series[k].left,
+                  net: p ? series[k].total - p.total : null, entered: false });
+    });
+    return { canEdit: true, today: '2026-10', series, rows, estimatedEnd: 4, noStart: 2 };
+  })(),
 };
 
 // ---- boot -------------------------------------------------------------------
@@ -731,8 +887,23 @@ async function boot({ vp = 'phone', dark = false, as = 'master' } = {}) {
 
 async function gotoTab(page, tab, sub) {
   if (!tab) return;
-  await page.evaluate((t) => window.switchMainTab && window.switchMainTab(t), tab);
-  await page.waitForTimeout(400);
+  // ⚠️ The app's own first switchMainTab can land AFTER this one: setupInterfaceBasedOnRole may
+  // run a second time once the resume fetch returns, and a fresh profile is always "first load
+  // of the day", so that run switches to ホーム. A fixed sleep lost that race about half the time
+  // and every shot silently became ホーム — a pixel diff then compares two ホーム pages and says
+  // "identical". So: switch, then require the view to be on screen on two checks in a row.
+  // The nav button, not the view: switchMainTab marks btn-<tab> active for every tab, while the
+  // view id has exceptions (admissions → view-shared-schedule) the driver should not restate.
+  const shown = (t) => { const b = document.getElementById('btn-' + t); return !!(b && b.classList.contains('active')); };
+  let steady = 0;
+  for (let i = 0; i < 12 && steady < 2; i++) {
+    if (!(await page.evaluate(shown, tab))) {
+      steady = 0;
+      await page.evaluate((t) => window.switchMainTab && window.switchMainTab(t), tab);
+    } else steady++;
+    await page.waitForTimeout(400);
+  }
+  if (!(await page.evaluate(shown, tab))) console.error('⚠️ driver: tab "' + tab + '" is not on screen — the shot shows something else');
   // 学生一覧's five sub-views (current | report | dest | simulation | recruit) and the
   // dorm pair are reached through their own switcher, not switchMainTab — without
   // this the driver can only ever see each tab's default sub-view.

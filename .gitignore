@@ -12,8 +12,12 @@ codex-session-*.md
 # Python bytecode from running tools/*.py
 __pycache__/
 
+# Local session handover notes — kept on disk, never committed
+handover.md
+
 # Kept out of this public copy on purpose: deploy settings naming the Apps Script
 # projects, and the maintainer's private working notes.
 .clasp.json
 .clasp-*.json
 CLAUDE.md
+docs/claude/

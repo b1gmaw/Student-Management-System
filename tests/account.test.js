@@ -75,8 +75,10 @@ console.log("\n1. メール通知 changes the CALLER's own row, whatever id the 
       Staff_Master: [['ID', 'Name', 'PIN', 'Email', 'Notif'], ['5', '五郎', '', 'a@x', 'ON'], ['6', '六子', '', 'b@x', 'ON']],
       Teacher_Master: [['ID', 'Name', 'PIN', 'Email', 'Notif'], ['5', '先生', '', 't@x', 'ON']],
     };
-    const ctx = sandbox([src], {
-      _requireSession_: function () { return auth; },
+    // The REAL _requireSession_. A stub returning whatever it was handed is how "no session" once
+    // looked like a normal caller here: it returned null, and the old code fell back to the arguments.
+    const ctx = sandbox([codeFn('_sessionDeadError_'), codeFn('_requireSession_'), src], {
+      _authUser: auth,
       _isMasterRole_: function (r) { return String(r) === 'master'; },
       SpreadsheetApp: { getActiveSpreadsheet: function () { return { getSheetByName: function (n) { return {
         getDataRange: function () { return { getValues: function () { return rows[n]; } }; },
@@ -98,11 +100,13 @@ console.log("\n1. メール通知 changes the CALLER's own row, whatever id the 
   const master = run(T, { role: 'master', id: 'MASTER' }, ['6', 'sales', false]);
   check("master has no row: refused with an actionable message, nothing written",
     master.writes.length === 0 && /マスター/.test(master.err || ''), JSON.stringify(master));
-  const observe = run(T, null, ['6', 'sales', true]);
-  check("observe mode with no session still reads the arguments, as every guard does there",
-    observe.writes.length === 1 && observe.writes[0][1] === 3, JSON.stringify(observe));
+  // ⚠️ Inverted 2026-09-21, when observe mode was removed. It used to assert that with no session the
+  // browser's arguments were honoured — i.e. that anyone could switch anyone's notifications.
+  const anon = run(T, null, ['6', 'sales', true]);
+  check("with no session it refuses, and writes nothing for anyone",
+    anon.writes.length === 0 && /再度ログインしてください/.test(anon.err || ''), JSON.stringify(anon));
   let mutant;
-  try { mutant = run(mutate(T, 'if (me) { userId = me.id; userRole = me.role; }', ''), me, ['6', 'sales', false]); }
+  try { mutant = run(mutate(T, 'userId = me.id; userRole = me.role;', ''), me, ['6', 'sales', false]); }
   catch (e) { mutant = { writes: [], err: e.message }; }
   check("mutation: trusting the arguments writes the colleague's row",
     mutant.writes.length === 1 && mutant.writes[0][1] === 3, JSON.stringify(mutant));
@@ -232,10 +236,12 @@ console.log("\n4. apiCall parks the proven token for one call, and always clears
   const A = codeFn('apiCall');
   function run(src) {
     const ctx = sandbox([
-      'var _authUser = null; var _authToken = ""; var _currentMethod = ""; var _authMismatchSeen = {}; var seen = null;',
+      'var _authUser = null; var _authToken = ""; var seen = null;',
       'function _apiMethods_() { return { probe: function () { seen = _authToken; return 1; }, boom: function () { seen = _authToken; throw new Error("x"); } }; }',
       'function resumeSession(t) { if (t === "bad") throw new Error("dead"); return { role: "sales", id: "5" }; }',
-      'function _authEnforcing_() { return true; }',
+      // An account with its password set; authz.test §6 covers the must-set refusal.
+      'function _accountNeedsPassword_() { return false; }',
+      'function _sessionDeadError_(m) { const e = new Error(m); e.sessionDead = true; return e; }',
       src], {});
     const r = {};
     ctx.apiCall('tokA', 'probe', []); r.seenOk = ctx.seen; r.afterOk = ctx._authToken;
@@ -248,7 +254,7 @@ console.log("\n4. apiCall parks the proven token for one call, and always clears
   check("...and it is cleared afterwards, even when the endpoint throws or the token is bad",
     r.afterOk === '' && r.afterThrow === '' && r.afterBad === '', JSON.stringify(r));
   let m;
-  try { m = run(mutate(A, 'finally { _authUser = null; _authToken = ""; _currentMethod = ""; }', 'finally { _authUser = null; _currentMethod = ""; }')); }
+  try { m = run(mutate(A, 'finally { _authUser = null; _authToken = ""; }', 'finally { _authUser = null; }')); }
   catch (e) { m = { afterOk: 'threw' }; }
   check("mutation: without the clear, the token outlives the call", m.afterOk === 'tokA', JSON.stringify(m));
   check("⚠️ _authToken is declared beside _authUser, above every reader (rule 3)",
@@ -370,7 +376,7 @@ console.log("\n8. ログイン中の端末: which device, as the browser describ
     escHtmlJs: function (v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); },
     escAttrJsStr: function (v) { return String(v); },
   };
-  const R = sandbox([htmlFn('_acctStamp'), htmlFn('_acctRenderSessions')], renv);
+  const R = sandbox([htmlFn('formatStampDisplay'), htmlFn('_acctRenderSessions')], renv);
   R._acctRenderSessions([
     { sid: 's1', current: true, device: 'Windows · Edge', deviceId: '3f9a2c1b', lastSeen: '2026-09-15 10:00:00', started: '2026-09-14 09:00:00' },
     { sid: 's2', current: false, device: '<img src=x onerror=alert(1)>', deviceId: '', lastSeen: '', started: '' },

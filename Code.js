@@ -19,71 +19,29 @@ let _authUser = null;
 // ⚠️ Set only after resumeSession succeeds, and cleared in apiCall's finally with _authUser.
 let _authToken = "";
 
-// The caller, or null when nothing resolved a session. Guards must treat null as
-// "deny" — never as "unknown, allow".
-function _caller_() { return _authUser; }
-
-// ---- Observe-then-enforce -------------------------------------------------
-// AUTH_ENFORCE script property: "1" enforces, anything else observes. In observe
-// mode the guards behave exactly as before (trusting the argument) but every
-// disagreement with the resolved session is logged, so a mapping mistake shows
-// up as a log line instead of a staff member locked out of a screen.
+// ---- The session decides ---------------------------------------------------
+// Role and permissions come from the session apiCall resolved, never from the
+// arguments. There is NO mode switch. An observe mode (AUTH_ENFORCE unset) ran
+// during the rollout and was removed on 2026-09-21, once both projects had
+// enforced with zero mismatches for a week. ⚠️ It also failed OPEN: an unreadable
+// script property meant "observe", and observe trusted the role the browser sent,
+// so a properties outage silently downgraded authorization. Do not bring a switch
+// back — tests/authlayer.test.js pins that none exists.
 //
-// ⚠️ OBSERVE MODE CLOSES NOTHING. getDashboardData("teacher") still succeeds
-// while it is on. It buys a safe rollout, not safety — it is only worth
-// anything if the flip to "1" actually happens.
-const AUTH_ENFORCE_PROP = 'AUTH_ENFORCE';
-let _authEnforceMemo = null;
-
-function _authEnforcing_() {
-  if (_authEnforceMemo !== null) return _authEnforceMemo;
-  let v = "";
-  try {
-    v = String(PropertiesService.getScriptProperties().getProperty(AUTH_ENFORCE_PROP) || "").trim();
-  } catch (e) { /* unreadable — observe, so a properties outage cannot lock out every user */ }
-  _authEnforceMemo = (v === "1");
-  return _authEnforceMemo;
-}
-
-// One log row per method per execution, so a screen that makes 20 calls does not
-// write 20 rows. Keyed in memory, not cache — this is per-request by design.
-let _authMismatchSeen = {};
-
-function _authMismatch_(method, claimedRole) {
-  if (_authMismatchSeen[method]) return;
-  _authMismatchSeen[method] = true;
-  const real = _authUser ? (_authUser.role + "/" + _authUser.id) : "(no session)";
-  try {
-    console.warn("AUTH observe: " + method + " claimed '" + String(claimedRole) + "' but session says " + real);
-  } catch (e) {}
-  try {
-    _logActivity_({ name: "システム", id: "AUTH", role: "system" },
-                 "権限の不一致を記録", method, "claimed=" + String(claimedRole) + " session=" + real);
-  } catch (e) {}
-}
-
-// Resolve the role/permissions a guard should actually use.
-//   enforcing → the session, always. No session means no permissions.
-//   observing → the argument, as before, but note the disagreement.
+// No session means no role and no permissions, so every guard built on these
+// denies. The argument is IGNORED; it stays only so the ~74 endpoints still taking
+// (role, perms) need no edit yet (removing it is review item D1).
 function _effectiveRole_(claimedRole) {
-  if (_authEnforcing_()) return _authUser ? String(_authUser.role || "") : "";
-  if (_authUser && String(_authUser.role || "") !== String(claimedRole || "")) {
-    _authMismatch_(_currentMethod || "?", claimedRole);
-  }
-  return String(claimedRole || "");
+  return _authUser ? String(_authUser.role || "") : "";
 }
 
 function _effectivePerms_(claimedPerms) {
-  if (_authEnforcing_()) return _authUser ? _authUser.permissions : "";
-  return claimedPerms;
+  return _authUser ? _authUser.permissions : "";
 }
-
-let _currentMethod = "";
 
 // For endpoints that never took a role at all — getAllTeachersSchedule(weekStart),
 // shinsei_deleteStudent(studentName). There is no argument to distrust; the
-// guard has to be added outright. Observing, this only logs, so behaviour is
-// unchanged until the flip.
+// guard has to be added outright.
 // ⚠️ Every "your session is gone" throw goes through here, and nothing else does.
 // The flag lets checkSession tell a dead session from a Sheets hiccup on the
 // server. The client sees only the message, so every one ends in
@@ -98,18 +56,7 @@ function _sessionDeadError_(msg) {
 
 function _requireSession_(what) {
   if (_authUser) return _authUser;
-  if (!_authEnforcing_()) { _authMismatch_(what || "?", "(no role argument)"); return null; }
   throw _sessionDeadError_("セッションがありません。再度ログインしてください。");
-}
-
-// As above, plus a permission. Master passes everything, as everywhere else.
-function _requirePerm_(needed, what) {
-  const u = _requireSession_(what);
-  if (!_authEnforcing_()) return;
-  if (!u) throw _sessionDeadError_("セッションがありません。再度ログインしてください。");
-  if (String(u.role || "") === "master") return;
-  const list = String(u.permissions || "");
-  if (list !== "ALL" && list.indexOf(needed) === -1) throw new Error("権限がありません");
 }
 
 // ---- The one authenticated door -------------------------------------------
@@ -124,18 +71,23 @@ function apiCall(token, method, args) {
   const fn = _apiMethods_()[name];
   if (!fn) throw new Error("不正な呼び出しです。");
 
-  // A bad token must not be fatal while observing, or turning observe mode on
-  // would itself be the outage it exists to avoid.
-  try { _authUser = resumeSession(token); _authToken = String(token || ""); }
-  catch (e) {
-    _authUser = null; _authToken = "";
-    if (_authEnforcing_()) throw e;
+  // A missing, unknown or expired token throws HERE, before the endpoint runs:
+  // resumeSession raises the session-dead error, which is what signs the browser out.
+  _authUser = null; _authToken = "";
+  _authUser = resumeSession(token);
+  // ⚠️ A FORCED password change is enforced HERE, not only by the panel (2026-10-26). Until then a
+  // session signed in with a temporary password could call every endpoint from the console,
+  // and an admin who reset someone kept that person's open tab fully working. A real tab never
+  // gets here in that state: the panel uses completePasswordSetup / getBootBundle, both off this
+  // door. A session-death error, so an open tab signs out and the next login shows the panel.
+  if (_accountNeedsPassword_(_authUser)) {
+    _authUser = null;
+    throw _sessionDeadError_("パスワードの設定が必要です。再度ログインしてください。");
   }
+  _authToken = String(token || "");
 
-  _currentMethod = name;
-  _authMismatchSeen = {};
   try { return fn.apply(null, args || []); }
-  finally { _authUser = null; _authToken = ""; _currentMethod = ""; }
+  finally { _authUser = null; _authToken = ""; }
 }
 
 // ============================================================================
@@ -185,6 +137,29 @@ function _requireMaintenanceUnlock_(what) {
     throw new Error("この操作はロックされています。⚙ プロジェクトの設定 → スクリプト プロパティ で "
                   + MAINT_UNLOCK_PROP + " に本日の日付（" + today + "）を設定してから実行してください。");
   }
+}
+
+// The two trigger functions (triggerScheduledBackup, triggerAutoSyncStudents) cannot be private:
+// the trigger picker hides `_`-suffixed names. Until 2026-10-26 a throttle was their only guard,
+// so anyone holding the URL could run them with master rights, read the backup report, and,
+// because the throttle was set BEFORE anything else, make the real trigger find it set and
+// skip: an outsider could suppress the backups.
+//
+// A time trigger passes an event carrying its triggerUid. A browser can send any object, so
+// the uid is believed only if it names one of this project's real triggers, which it cannot
+// guess. Anything else (an editor Run, which passes no event) needs the maintenance unlock.
+// ⚠️ Call it FIRST, before the throttle, so a refused call never consumes it.
+// ⚠️ ScriptApp is the script.scriptapp scope: authoriseServices touches it (rule 6).
+function _requireTriggerOrUnlock_(e, what) {
+  const uid = (e && typeof e === "object" && e.triggerUid) ? String(e.triggerUid) : "";
+  if (uid !== "") {
+    let ok = false;
+    try {
+      ok = ScriptApp.getProjectTriggers().some(function (t) { return String(t.getUniqueId()) === uid; });
+    } catch (err) { /* unreadable: fall through to the unlock, fail closed */ }
+    if (ok) return;
+  }
+  _requireMaintenanceUnlock_(what);
 }
 
 // The master PIN guards the "master" role, which bypasses every permission check.
@@ -260,49 +235,6 @@ function _systemPinProblem_(v) {
 // It had no callers, and the editor's Run button cannot pass arguments, so it
 // could never be used legitimately anyway. Deleting it removes the vector with
 // certainty rather than defending it. Do not add it back.
-
-// Takes NO arguments, so it runs from the editor's Run button. Reports which
-// mode the auth layer is in and what the observe window has caught, so the
-// decision to flip AUTH_ENFORCE is made on evidence rather than a guess.
-function authEnforceStatus() {
-  _requireMaintenanceUnlock_("authEnforceStatus");
-  const on = _authEnforcing_();
-  let lines = [on
-    ? "✅ AUTH_ENFORCE=1 — 権限はセッションから判定されています。"
-    : "⚠️ AUTH_ENFORCE 未設定 — 観測モードです。クライアントが送ってきた役割をそのまま信用しています（穴は開いたまま）。"];
-
-  // Disagreements are written to Activity_Log by _authMismatch_.
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const log = ss.getSheetByName(AUDIT_SHEET);
-    if (log) {
-      const data = log.getDataRange().getDisplayValues();
-      const cut = new Date(new Date().getTime() - 7 * 24 * 3600 * 1000);
-      let hits = {};
-      let n = 0;
-      for (let i = 1; i < data.length; i++) {
-        if (String(data[i][4] || "") !== "権限の不一致を記録") continue;
-        const when = new Date(data[i][0]);
-        if (!isNaN(when.getTime()) && when < cut) continue;
-        const m = String(data[i][5] || "(?)");
-        hits[m] = (hits[m] || 0) + 1;
-        n++;
-      }
-      if (n === 0) {
-        lines.push("過去7日間の不一致: 0件。" + (on ? "" : "AUTH_ENFORCE=1 に切り替えて問題ありません。"));
-      } else {
-        lines.push("過去7日間の不一致: " + n + "件");
-        Object.keys(hits).sort(function (a, b) { return hits[b] - hits[a]; })
-          .forEach(function (m) { lines.push("   " + m + " × " + hits[m]); });
-        lines.push("↑ 通常操作でこれが出る場合はマッピングの誤りです。切り替える前に調べてください。");
-      }
-    }
-  } catch (e) { lines.push("Activity_Log を読めませんでした: " + e.message); }
-
-  const msg = lines.join("\n");
-  try { console.log(msg); } catch (e) {}
-  return msg;
-}
 
 // Takes NO arguments, so it runs straight from the editor's Run button.
 // Validates whatever is currently in the property and never echoes the value.
@@ -424,13 +356,32 @@ function _normName_(v) {
   return s.toLowerCase().trim();
 }
 
-// Combine bilingual EN/JP values into the stored "EN\nJP" form. Mirrors the
-// local combineLang used in the building functions, but global so room and
-// other functions can use it too.
+// Combine bilingual EN/JP values into the stored "EN\nJP" form. The ONE copy: saveBuilding and
+// updateBuilding each carried an identical local combineLang until 2026-09-28.
 function _combineLang_(en, jp) {
   en = (en == null ? '' : String(en));
   jp = (jp == null ? '' : String(jp));
   return (en === '' && jp === '') ? '' : (en + '\n' + jp);
+}
+
+// Upload one building photo and return its Drive file id. With no new photo it returns the
+// existing id (edit) or "" (new building). saveBuilding and updateBuilding each carried their own
+// nested copy until 2026-09-28; update's was the superset, since save simply has no existing id.
+//
+// The Drive name is <bldgId>_<slot>_<the name the user uploaded> since 2026-09-29, so the
+// file box can say WHICH photo is stored (_storedFileLabel_). Before that it was
+// <bldgId>_<slot>.jpg and the uploaded name was thrown away — those photos show no name.
+// The original name is kept verbatim even though compressImage re-encodes to JPEG: it is
+// the name the person will recognise.
+function _uploadBuildingPhoto_(folder, bldgId, photoObj, nameSuffix, existingId) {
+  if (photoObj && photoObj.base64) {
+    const decodedBytes = Utilities.base64Decode(photoObj.base64);
+    const original = String(photoObj.filename || "").trim();
+    const blob = Utilities.newBlob(decodedBytes, photoObj.mimeType,
+      bldgId + "_" + nameSuffix + (original ? "_" + original : ".jpg"));
+    return folder.createFile(blob).getId();
+  }
+  return existingId || "";
 }
 
 
@@ -601,6 +552,91 @@ const BACKUP_REPORT_PROP = 'BACKUP_REPORT';
 function _backupExclude_() { return [SESSION_SHEET, AUDIT_SHEET]; }
 const BACKUP_CELL_WARN = 8000000;   // Sheets caps one spreadsheet at 10M cells
 
+// ============================================================================
+// DATE COLUMNS CARRY A FIXED NUMBER FORMAT (2026-09-28)
+//
+// Dates reach the screen as a cell's DISPLAY text, and a Date cell with no number format of its
+// own displays in the spreadsheet's LOCALE — month-first in production (9/11/2026), year-first on
+// a Japanese-locale copy. Every `new Date()` write and the student import's copied source Dates
+// were such cells, so screens mixed 9/11/2026 with 2026/09/11. 学生一覧 mixed them within ONE
+// table: the import clearContents() — which KEEPS each cell's old format — and re-orders the rows,
+// so a student inherited whatever format their row number last carried.
+//
+// A number format on the whole column fixes the display in any locale, costs nothing on reads,
+// and needs no parsing of display text (never parse a Date's DISPLAY — see Sessions). Text cells
+// (データなし, a hand-typed 2026.4.1, '-marked stamps) are untouched by a format.
+// ⚠️ Located by HEADER NAME, never by position. ⚠️ A function, not a top-level const: three of
+// these sheet names are declared thousands of lines below (the v190 load-order crash).
+// ⚠️ Schedule_DB's dates and 募集状況's three dates are pinned to yyyy-mm-dd, NOT the display
+// format: the first are exact-string slot keys (_findScheduleRow_, _slotIsPast_, the client's
+// s.date ===), the second fill <input type="date">. Pinning keeps them what they already read as.
+function _dateColumnFormats_() {
+  const D = "yyyy/mm/dd", T = "yyyy/mm/dd hh:mm", ISO = "yyyy-mm-dd";
+  const STUDENT = ["生年月日", "入国日", "始業日", "卒業予定", "在留期限"];
+  let out = [];
+  ["Central_DB", "Past_DB"].forEach(function (sh, k) {
+    STUDENT.forEach(function (h) { out.push({ sheet: sh, header: h, fmt: D }); });
+    // Past_DB only (k 1): 増減推移 counts 出 by its month, so a locale-shaped display would be misread.
+    if (k === 1) out.push({ sheet: sh, header: "卒業年月日", fmt: D });
+  });
+  return out.concat([
+    { sheet: AUDIT_SHEET,             header: "Timestamp",         fmt: T },
+    { sheet: INTERVIEW_RESULTS_SHEET, header: "Timestamp",         fmt: T },
+    { sheet: INTERVIEW_RESULTS_SHEET, header: "日付",              fmt: D },
+    { sheet: SHEET_ANNOUNCEMENTS,     header: "作成日時",          fmt: T },
+    { sheet: SHEET_ANNOUNCEMENTS,     header: "有効期限",          fmt: D },
+    { sheet: SHEET_ENROL_HISTORY,     header: "記録日時",          fmt: T },
+    { sheet: SHEET_RECRUIT_NOTE,      header: "更新日時",          fmt: T },
+    { sheet: SHEET_RECRUIT_NOTE,      header: "リスト提出日",      fmt: ISO },
+    { sheet: SHEET_RECRUIT_NOTE,      header: "申請日",            fmt: ISO },
+    { sheet: SHEET_RECRUIT_NOTE,      header: "結果",              fmt: ISO },
+    { sheet: SCHED_TEMPLATE_SHEET,    header: "更新日時",          fmt: T },
+    { sheet: "Schedule_DB",           header: "Date",              fmt: ISO },
+    { sheet: "Schedule_DB",           header: "Reassign_New_Date", fmt: ISO },
+    { sheet: "Schedule_DB",           header: "BookerReq_Date",    fmt: ISO }
+  ]);
+}
+
+// Applies the table (optionally only to the named sheets). One setNumberFormat per format per
+// sheet; whole column below the header, so appended rows and clearContents'd rows keep it. A
+// missing sheet or header is skipped — the sheet may not exist yet. Returns "sheet:header" for
+// each column set.
+function _applyDateFormats_(only) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let bySheet = {};
+  _dateColumnFormats_().forEach(function (e) {
+    if (only && only.indexOf(e.sheet) === -1) return;
+    (bySheet[e.sheet] = bySheet[e.sheet] || []).push(e);
+  });
+  let done = [];
+  Object.keys(bySheet).forEach(function (name) {
+    const sh = ss.getSheetByName(name);
+    if (!sh) return;
+    const lastCol = sh.getLastColumn(), maxRows = sh.getMaxRows();
+    if (lastCol < 1 || maxRows < 2) return;
+    const headers = sh.getRange(1, 1, 1, lastCol).getDisplayValues()[0]
+      .map(function (h) { return String(h).trim(); });
+    let byFmt = {};
+    bySheet[name].forEach(function (e) {
+      const c = headers.indexOf(e.header);
+      if (c === -1) return;
+      (byFmt[e.fmt] = byFmt[e.fmt] || []).push(sh.getRange(2, c + 1, maxRows - 1, 1).getA1Notation());
+      done.push(name + ":" + e.header);
+    });
+    Object.keys(byFmt).forEach(function (fmt) { sh.getRangeList(byFmt[fmt]).setNumberFormat(fmt); });
+  });
+  return done;
+}
+
+// Editor-run (Run menu, so it cannot end in _): pins every date column now, rather than waiting
+// for the next triggerScheduledBackup. Run once per project after deploying this.
+function applyDateFormats() {
+  _requireMaintenanceUnlock_("applyDateFormats");
+  const done = _applyDateFormats_();
+  console.log("日付の表示形式を設定しました（" + done.length + "列）: " + done.join(", "));
+  return done;
+}
+
 // A fingerprint of what a sheet shows. Unchanged since the last run → no copy, so retention
 // holds distinct versions rather than three identical copies a day.
 function _sheetDigest_(sh) {
@@ -621,7 +657,8 @@ function _readBackupReport_() {
   } catch (e) { return null; }
 }
 
-function triggerScheduledBackup() {
+function triggerScheduledBackup(e) {
+  _requireTriggerOrUnlock_(e, "triggerScheduledBackup");
   try {
     const cache = CacheService.getScriptCache();
     if (cache.get('schedBackupRan')) {
@@ -662,6 +699,9 @@ function triggerScheduledBackup() {
     // Sessions are never COPIED (tokens), but this is the unattended write path that keeps them
     // tidy: dates normalised, expired ones dropped, at most SESSION_MAX_PER_ACCOUNT each.
     try { rep.sessions = _compactSessionsLocked_(); } catch (e) { rep.sessionsError = String((e && e.message) || e); }
+    // Re-pins the date columns, so a sheet created since, or a format changed by hand, is back to
+    // one date shape within hours.
+    try { rep.dateFormats = _applyDateFormats_().length; } catch (e) { rep.dateFormatsError = String((e && e.message) || e); }
     rep.nearLimit = rep.cells > BACKUP_CELL_WARN;   // the pane warns; the client holds no threshold
   } catch (e) {
     rep.error = String((e && e.message) || e);
@@ -732,6 +772,66 @@ function _cellSafe_(v) {
 // the guard cannot introduce that bug while preventing this one.
 function _cellSafeRow_(arr) { return arr.map(_cellSafe_); }
 
+// Editor-run measurement: which strings does Sheets turn into a formula, a number or text?
+// It exists because 申請関連 phone numbers kept showing #ERROR! on saves that went through
+// _cellSafe_, and whether Sheets evaluates a full-width ＋ or a zero-width prefix is a fact
+// about Sheets, not something to guess before widening a guard every write in the app uses.
+// Writes each input raw and through _cellSafe_, by setValues and by appendRow, in the default
+// format and in "@" (plain text), then reads formula / display / value back. The scratch sheet
+// is deleted in a finally, so an interrupted run leaves nothing behind.
+// First run, staging 2026-09-15: appendRow (not setValues) makes "+81 …" a formula; full-width
+// and zero-width look-alikes are inert; "@" format does not stop "=". TECHNICAL_REFERENCE §6.1.0.
+function probeSheetsTextInput() {
+  _requireMaintenanceUnlock_("probeSheetsTextInput");
+  const INPUTS = [
+    "+81 75 123 4567", "+977-1-4412345", "=1+1",
+    "＋81 75 123 4567", "＋８１７５", "＝1+1", "－3",
+    "​+81 75", " +81 75", "﻿+81 75",
+    "0751234567", "075-123-4567", "(075)123-4567", "０７５１２３",
+    "'0751234567", "'+81", "#ERROR!"
+  ];
+  const n = INPUTS.length;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.insertSheet("zz_probe_" + Date.now());
+  try {
+    // Rows 1..n: A raw / B guarded in the default format, C raw / D guarded in "@".
+    sh.getRange(1, 3, n, 2).setNumberFormat("@");
+    sh.getRange(1, 1, n, 4).setValues(INPUTS.map(function (s) { return [s, _cellSafe_(s), s, _cellSafe_(s)]; }));
+    // Rows n+1..2n: the appendRow path, A raw / B guarded.
+    INPUTS.forEach(function (s) { sh.appendRow([s, _cellSafe_(s)]); });
+    SpreadsheetApp.flush();
+
+    const rng = sh.getRange(1, 1, 2 * n, 4);
+    const F = rng.getFormulas(), D = rng.getDisplayValues(), V = rng.getValues();
+    const codes = function (s) {
+      return String(s).slice(0, 3).split("").map(function (ch) {
+        return "U+" + ("000" + ch.charCodeAt(0).toString(16).toUpperCase()).slice(-4);
+      }).join(" ");
+    };
+    const cell = function (r, c) {
+      if (F[r][c]) return "FORMULA " + JSON.stringify(F[r][c]) + " shows " + JSON.stringify(D[r][c]);
+      const v = V[r][c];
+      const t = Object.prototype.toString.call(v).slice(8, -1);
+      return t + " " + JSON.stringify(v) + (D[r][c] !== String(v) ? " shows " + JSON.stringify(D[r][c]) : "");
+    };
+    const out = [];
+    INPUTS.forEach(function (s, i) {
+      out.push(JSON.stringify(s) + "  [" + codes(s) + "]  guarded=" + JSON.stringify(_cellSafe_(s)));
+      out.push("  setValues  raw      : " + cell(i, 0));
+      out.push("  setValues  guarded  : " + cell(i, 1));
+      out.push("  @ format   raw      : " + cell(i, 2));
+      out.push("  @ format   guarded  : " + cell(i, 3));
+      out.push("  appendRow  raw      : " + cell(n + i, 0));
+      out.push("  appendRow  guarded  : " + cell(n + i, 1));
+    });
+    const report = out.join("\n");
+    console.log(report);
+    return report;
+  } finally {
+    try { ss.deleteSheet(sh); } catch (e) {}
+  }
+}
+
 // Append an audit entry. actor = {name, id, role} (any may be missing).
 function _logActivity_(actor, action, target, details) {
   try {
@@ -749,8 +849,8 @@ function _logActivity_(actor, action, target, details) {
     // The parked session wins where there is one, which makes these rows
     // evidence rather than a hint.
     //
-    // Rows written by the system itself (the AUTH observe entries, the master
-    // PIN notes) pass no session and keep the actor they were given.
+    // Rows written by the system itself (triggers, the master PIN notes) pass
+    // no session and keep the actor they were given.
     if (_authUser) {
       actor = { name: _authUser.name, id: _authUser.id, role: _authUser.role };
     }
@@ -783,65 +883,8 @@ function _actorFrom_(obj, role) {
 }
 
 // Return the most recent audit-log rows (newest first), admin only.
-// DIAGNOSTIC (admin-only): compares every distinct 担当 (In Charge) value used on
-// bookings in Schedule_DB against the names in Staff_Master, using the same
-// normalization the matching code uses. Reports which 担当 values resolve to a
-// staff member and which DON'T (those are the ones whose notifications/emails
-// would silently miss). Read-only — changes nothing.
-function diagnoseInChargeMatching(userRole) {
-  if (!_isAdminLevel_(userRole)) throw new Error("管理者のみ実行できます。");
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sSheet = ss.getSheetByName("Schedule_DB");
-  const stSheet = ss.getSheetByName("Staff_Master");
-  if (!sSheet || !stSheet) throw new Error("必要なシートが見つかりません。");
-
-  // Build the set of normalized staff names (with their original form).
-  const staffData = stSheet.getDataRange().getDisplayValues();
-  let staffByNorm = {};
-  let staffNames = [];
-  for (let i = 1; i < staffData.length; i++) {
-    let original = String(staffData[i][1] || "").trim();
-    if (original === "") continue;
-    let norm = _normName_(original);
-    staffByNorm[norm] = original;
-    staffNames.push(original);
-  }
-
-  // Collect distinct 担当 values from bookings (Schedule_DB col 12 / idx 11),
-  // counting how many bookings use each.
-  const data = sSheet.getDataRange().getDisplayValues();
-  let counts = {};      // normalized -> { original, count }
-  for (let i = 1; i < data.length; i++) {
-    let raw = String(data[i][11] || "").trim();
-    if (raw === "") continue;
-    let norm = _normName_(raw);
-    if (!counts[norm]) counts[norm] = { original: raw, count: 0 };
-    counts[norm].count++;
-  }
-
-  let matched = [], unmatched = [];
-  Object.keys(counts).forEach(function(norm){
-    let item = { value: counts[norm].original, bookings: counts[norm].count };
-    if (staffByNorm[norm]) {
-      item.matchesStaff = staffByNorm[norm];
-      matched.push(item);
-    } else {
-      unmatched.push(item);
-    }
-  });
-
-  // Sort unmatched by most bookings affected (most impactful first).
-  unmatched.sort(function(a, b){ return b.bookings - a.bookings; });
-  matched.sort(function(a, b){ return b.bookings - a.bookings; });
-
-  return {
-    staffNames: staffNames,
-    matched: matched,
-    unmatched: unmatched,
-    summary: matched.length + " 件の担当名が一致、" + unmatched.length + " 件が不一致（通知・メールが届かない可能性）"
-  };
-}
-
+// (diagnoseInChargeMatching, the 担当名チェック pane, was removed 2026-10-26: a booking's 担当
+// is now the booking account's own name, never typed. See TECHNICAL_REFERENCE §12.)
 function getActivityLog(userRole, limit) {
   if (!_isAdminLevel_(userRole)) throw new Error("権限がありません");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1219,87 +1262,6 @@ function _ensureRoleColumn_(sheet) {
   } catch (e) { /* best-effort; an un-widenable sheet surfaces at the write */ }
 }
 
-function migrateAddPasswordColumns() {
-  _requireMaintenanceUnlock_("migrateAddPasswordColumns");
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let done = [];
-  ["Staff_Master", "Teacher_Master"].forEach(function (name) {
-    const sh = ss.getSheetByName(name);
-    if (!sh) { done.push(name + ": not found"); return; }
-
-    const headers = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 1)).getDisplayValues()[0];
-    if (headers[6] === ACCOUNT_HEADERS[0] && headers[10] === ACCOUNT_HEADERS[4]) {
-      done.push(name + ": already migrated (" + sh.getMaxColumns() + " columns)");
-      return;
-    }
-
-    _snapshotSheet_(name);
-    const have = sh.getMaxColumns();
-    if (have < ACCOUNT_COLS) sh.insertColumnsAfter(have, ACCOUNT_COLS - have);
-    sh.getRange(1, 7, 1, ACCOUNT_HEADERS.length).setValues([ACCOUNT_HEADERS]);
-    // Hash and salt are opaque strings; keep the columns text so nothing is
-    // coerced into a number or a date.
-    sh.getRange(2, 7, Math.max(sh.getMaxRows() - 1, 1), ACCOUNT_HEADERS.length).setNumberFormat("@");
-    done.push(name + ": migrated " + have + " -> " + sh.getMaxColumns() + " columns");
-  });
-  SpreadsheetApp.flush();
-  return done.join("\n");
-}
-
-// Read-only pre-flight. Run BEFORE the cutover: a user with no email can never
-// log in afterwards, and a duplicate email makes the lookup ambiguous.
-// Also doubles as the migration progress view — re-run until nobody lacks a hash.
-function auditAccountReadiness() {
-  _requireMaintenanceUnlock_("auditAccountReadiness");
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let noEmail = [], dupes = [], noHash = [], odd = [];
-  let byEmail = {};
-
-  ["Staff_Master", "Teacher_Master"].forEach(function (name) {
-    const sh = ss.getSheetByName(name);
-    if (!sh) return;
-    const rows = sh.getDataRange().getDisplayValues();
-    for (let i = 1; i < rows.length; i++) {
-      const id = String(rows[i][0] || "").trim();
-      if (!id) continue;
-      const label = name + " / " + id + " " + String(rows[i][1] || "").trim();
-      const rawEmail = String(rows[i][3] || "");
-      const email = rawEmail.trim().toLowerCase();
-
-      if (email === "") { noEmail.push(label); }
-      else {
-        if (rawEmail !== rawEmail.trim() || rawEmail !== rawEmail.toLowerCase()) {
-          odd.push(label + "  \"" + rawEmail + "\"");
-        }
-        if (byEmail[email]) dupes.push(email + "  →  " + byEmail[email] + "  &  " + label);
-        else byEmail[email] = label;
-      }
-      if (String(rows[i][6] || "").trim() === "") noHash.push(label);
-    }
-  });
-
-  let out = ["", "--- account readiness ---"];
-  const section = function (title, list, note) {
-    out.push("");
-    out.push(list.length === 0 ? "✅ " + title + ": none" : "❌ " + title + ": " + list.length);
-    if (note && list.length) out.push("   " + note);
-    list.forEach(function (l) { out.push("   • " + l); });
-  };
-  section("users with no email (cannot log in after cutover)", noEmail, "fill these in before shipping");
-  section("duplicate emails (ambiguous login)", dupes, "each email must map to exactly one person");
-  section("emails with stray case/whitespace", odd, "matching trims and lowercases, so these still work — but tidy them");
-  section("users with no password yet (migration pending)", noHash, "they can still log in with their old PIN once");
-
-  out.push("");
-  out.push(noHash.length === 0
-    ? "All users have set a password — column 2 (PIN) can now be blanked."
-    : noHash.length + " user(s) still to migrate. Do NOT blank the PIN column yet.");
-
-  const s = out.join("\n") + "\n";
-  Logger.log(s);
-  return s;
-}
-
 
 // --- AUTHENTICATION ENGINE (MASTER + STAFF + TEACHERS) ---
 
@@ -1340,8 +1302,8 @@ function _userFromRow_(row, roleName) {
 // 1-based row index and the raw row, or null.
 //
 // Matching trims and lowercases: a stray capital in the sheet must not lock
-// somebody out. auditAccountReadiness reports duplicates, and this deliberately
-// returns the FIRST match rather than guessing between them.
+// somebody out. A duplicate email is possible (the one-off auditAccountReadiness that listed them
+// was retired 2026-09-21), so this deliberately returns the FIRST match rather than guessing.
 function _findAccountByEmail_(email) {
   const want = String(email || "").trim().toLowerCase();
   if (want === "") return null;
@@ -1376,11 +1338,13 @@ function _verifyAccountPassword_(row, password) {
   if (hash !== "" && salt !== "") {
     // Fail closed on anything not produced by the current algorithm: an untagged
     // or differently-tagged hash is treated as unusable rather than compared.
-    if (hash.indexOf(PW_ALGO_TAG + "$") !== 0) return { ok: false, mustSetPassword: false };
+    if (hash.indexOf(PW_ALGO_TAG + "$") !== 0) { _burnPasswordHash_(password); return { ok: false, mustSetPassword: false }; }
     const ok = _hashesEqual_(_hashPassword_(password, salt, iters), hash);
     return { ok: ok, mustSetPassword: ok && String(row[10] || "").trim() === "Y" };
   }
 
+  // Every path spends one full hash, so the time taken says nothing about the account (finding 5).
+  _burnPasswordHash_(password);
   const legacyPin = String(row[2] || "").trim();
   if (legacyPin !== "" && String(password) === legacyPin) {
     return { ok: true, mustSetPassword: true };
@@ -1613,21 +1577,33 @@ function _issueSessionToken_(user, device) {
   }
 }
 
-// Login: validate PIN, return user + a session token for persistence.
-// Brute-force hardening for the PIN login.
+// Login: validate the password, return user + a session token for persistence.
+// Brute-force hardening.
 //
-// A web app receives no caller IP, so per-attacker limits are impossible — the
-// only lever is making every failure cost time. Deliberately a DELAY and never a
-// lockout: access is anonymous, so anyone could trip a lockout and deny every
-// member of staff. The escalation is capped for the same reason.
+// A web app receives no caller IP, so per-ATTACKER limits are impossible. Until 2026-10-26 the
+// only lever was a global delay escalating to 8s per failure. It did not hold: the delay slows
+// one request, not an attacker sending thirty at once (~4–20 guesses a second), and every
+// sleeping failure held one of the deployer's concurrent executions, so a flood of bad logins
+// could crowd real staff out of the whole app.
+//
+// Now the limit is per ACCOUNT, i.e. per sign-in name: LOGIN_ACCOUNT_MAX attempts per
+// LOGIN_ACCOUNT_WINDOW. Past it, attempts are refused at once (no password check, no sleep, so a
+// flood holds no executions). Unknown names get a bucket too, so the limit says nothing about
+// which emails exist.
+// ⚠️ The trade-off, accepted on purpose: anyone who knows a colleague's email can keep THAT
+// account's sign-in refused, 15 minutes at a time. Signed-in sessions are untouched (30 days,
+// sliding), and the message says to wait. It is the price of a limit an attacker cannot
+// parallelise around.
+// ⚠️ The counter is read and bumped under the script lock: without it thirty parallel guesses
+// all read 0 and write 1. A busy lock REFUSES (try again), never lets an attempt through uncounted.
 //
 // Failures go to Cloud Logging, NOT to Activity_Log — that sheet grows unbounded
 // and appendRow slows as it does, so logging an attack there would degrade the
 // whole app for everyone.
-const LOGIN_FAIL_DELAY_MS    = 1500;   // every failed attempt pays this
-const LOGIN_FAIL_WINDOW      = 300;    // 5 min counter window
-const LOGIN_FAIL_ESCALATE_AT = 8;      // failures in the window before escalating
-const LOGIN_FAIL_MAX_DELAY_MS = 8000;  // cap, so the delay can't become the DoS
+const LOGIN_FAIL_DELAY_MS   = 1000;   // flat: every wrong password pays this, never escalating
+const LOGIN_FAIL_WINDOW     = 300;    // the global counter, for the log line only
+const LOGIN_ACCOUNT_MAX     = 5;      // attempts per sign-in name...
+const LOGIN_ACCOUNT_WINDOW  = 900;    // ...per 15 minutes (sliding from the last counted one)
 
 function _noteLoginFailure_() {
   try {
@@ -1638,17 +1614,169 @@ function _noteLoginFailure_() {
   } catch (e) { return 1; }
 }
 
+// The cache key for one sign-in name: a hash, so the cache never holds an email.
+function _loginAttemptKey_(id) {
+  const norm = String(id == null ? "" : id).trim().toLowerCase();
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, norm, Utilities.Charset.UTF_8);
+  let hex = "";
+  for (let i = 0; i < 12; i++) hex += ("0" + ((bytes[i] + 256) % 256).toString(16)).slice(-2);
+  return "loginTry_" + hex;
+}
+
+// One name's bucket: { n, devs: {deviceId: label}, anon, logged, exp }. `devs` is what lets a
+// block be traced to a device (_reportLoginBlock_); `logged` makes it reported once; `exp` is
+// the window's end, so rewriting the bucket to set `logged` does not extend the block.
+// A bare number is the shape written before 2026-10-26 and still reads.
+const LOGIN_BUCKET_DEVICES = 5;   // distinct devices kept per bucket
+
+function _loginBucket_(raw) {
+  const empty = { n: 0, devs: {}, anon: false, logged: false, exp: 0 };
+  const s = String(raw == null ? "" : raw);
+  if (s === "") return empty;
+  if (/^\d+$/.test(s)) { empty.n = parseInt(s, 10); return empty; }
+  try {
+    const b = JSON.parse(s);
+    return { n: parseInt(b.n, 10) || 0, devs: (b.devs && typeof b.devs === "object") ? b.devs : {},
+             anon: b.anon === true, logged: b.logged === true, exp: Number(b.exp) || 0 };
+  } catch (e) { return empty; }
+}
+
+// state "ok" = counted, go on; "limit" = this name is at its limit; "limit-first" = the same, and
+// this is the first refusal of the window, so it is reported; "busy" = the lock was not free.
+// `dev` is _sessionDevice_'s output for this attempt.
+// ⚠️ A cache OUTAGE answers "ok": the flat delay still applies, and refusing every login because
+// the cache is down would lock out the whole staff.
+function _reserveLoginAttempt_(id, dev) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(2000)) return { state: "busy" };
+  try {
+    const cache = CacheService.getScriptCache();
+    const k = _loginAttemptKey_(id);
+    const b = _loginBucket_(cache.get(k));
+    const now = Date.now();
+    if (b.n >= LOGIN_ACCOUNT_MAX) {
+      if (b.logged) return { state: "limit", bucket: b };
+      // ⚠️ Flagged under the lock, so two parallel refusals cannot both report. The TTL is what
+      // is LEFT of the window: a fresh full window here would extend the block.
+      b.logged = true;
+      const left = b.exp > now ? Math.ceil((b.exp - now) / 1000) : LOGIN_ACCOUNT_WINDOW;
+      cache.put(k, JSON.stringify(b), Math.max(1, left));
+      return { state: "limit-first", bucket: b };
+    }
+    const d = dev || {};
+    if (d.id) {
+      if (!Object.prototype.hasOwnProperty.call(b.devs, d.id) && Object.keys(b.devs).length < LOGIN_BUCKET_DEVICES) {
+        b.devs[d.id] = String(d.label || "");
+      }
+    } else {
+      b.anon = true;
+    }
+    b.n += 1;
+    b.exp = now + LOGIN_ACCOUNT_WINDOW * 1000;
+    cache.put(k, JSON.stringify(b), LOGIN_ACCOUNT_WINDOW);
+    return { state: "ok", bucket: b };
+  } catch (e) {
+    return { state: "ok" };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ⚠️ "WHO did it" cannot be proven: the web app is anonymous, so a login call carries no IP and no
+// Google account. What it does carry is the browser's own random device id (_deviceId in
+// Index.html), and Sessions records which accounts have signed in from which device id. So a
+// colleague blocking someone from their own browser is named here; an outsider, or anyone who
+// clears or forges the id, is not. The wording says exactly that: users who have signed in from
+// the same device, never "the culprit". Display only, as CLAUDE.md requires of Device/DeviceId.
+//
+// Once per block (the `logged` flag), only for an account that EXISTS: a spray of random emails
+// blocks nobody, and must not grow Activity_Log (why failures go to Cloud Logging). The blocked
+// person is emailed if their notifications are on, the rule _sendAdminCancelEmail_ uses; the
+// email names the device but never the other users, who are the administrator's record.
+// ⚠️ Never throws: a reporting failure must not change the refusal.
+function _reportLoginBlock_(id, b) {
+  try {
+    const bucket = b || _loginBucket_("");
+    let who;
+    if (String(id || "").trim().toUpperCase() === "MASTER") {
+      who = { name: "システム", id: "MASTER", email: "", notif: false };
+    } else {
+      const acct = _findAccountByEmail_(id);
+      if (!acct) { try { console.warn("Login limit reached for an unknown name: not recorded"); } catch (e) {} return; }
+      who = { name: String(acct.row[1] || "").trim(), id: String(acct.row[0] || "").trim(),
+              email: String(acct.row[3] || "").trim(), notif: String(acct.row[4]).trim() !== "OFF" };
+    }
+
+    const ids = Object.keys(bucket.devs || {});
+    const devText = ids.length
+      ? ids.map(function (d) { return (bucket.devs[d] || "不明な端末") + " [" + d.slice(0, 8) + "]"; }).join("、")
+      : "端末情報なし";
+    let users = [];
+    if (ids.length) {
+      try {
+        _getSessionSheet_();
+        const rows = _readTabs_([SESSION_SHEET])[SESSION_SHEET] || [];
+        for (let i = 1; i < rows.length; i++) {
+          if (ids.indexOf(String(rows[i][7] || "").trim()) === -1) continue;
+          const u = String(rows[i][3] || "").trim() + " (" + String(rows[i][2] || "").trim() + ")";
+          if (users.indexOf(u) === -1) users.push(u);
+        }
+      } catch (e) { users = null; }   // unreadable: say so rather than "none"
+    }
+    let details = LOGIN_ACCOUNT_MAX + "回失敗（" + (LOGIN_ACCOUNT_WINDOW / 60) + "分間） / 端末: " + devText;
+    if (bucket.anon && ids.length) details += "（端末情報なしの試行あり）";
+    if (ids.length) {
+      details += " / 同じ端末でログインしたことのあるユーザー: " +
+        (users === null ? "確認できませんでした" : (users.length ? users.join("、") : "なし（初めての端末）"));
+    }
+    _logActivity_({ name: "（ログイン画面）", id: "", role: "" }, "ログイン一時停止",
+                  who.name + " (" + who.id + ")", details);
+
+    if (who.email && who.notif) {
+      const stamp = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm");
+      const body = who.name + " 様\n\n" +
+        "あなたのアカウントでログインの失敗が続いたため、ログインを" + (LOGIN_ACCOUNT_WINDOW / 60) + "分間一時停止しました。\n\n" +
+        "日時: " + stamp + "\n" +
+        "端末: " + devText + "\n\n" +
+        "すでにログインしている端末は、そのままご利用いただけます。\n" +
+        "心当たりがない場合は、管理者にお知らせください。\n";
+      try {
+        GmailApp.sendEmail(who.email, "【マイスケジュール】ログインが一時停止されました", body, _mailOptions_());
+      } catch (e) { try { console.warn("Login block email failed: " + e); } catch (e2) {} }
+    }
+  } catch (e) {
+    try { console.warn("Login block report failed: " + e); } catch (e2) {}
+  }
+}
+
+// A correct password clears the name's count, so a typo or two never carries over.
+function _clearLoginAttempts_(id) {
+  try { CacheService.getScriptCache().remove(_loginAttemptKey_(id)); } catch (e) {}
+}
+
+// One full-cost hash whose result is thrown away. An unknown email, or an account still on its
+// legacy PIN, used to skip the 100k-round hash and answer measurably faster, which told an
+// attacker which emails have accounts (review finding 5, 2026-10-26).
+function _burnPasswordHash_(pw) {
+  _hashPassword_(String(pw == null ? "" : pw), "login-timing-equaliser", PW_ITERATIONS);
+}
+
 // Shared failure path: one message for every reason, so the response cannot be
 // used to discover which emails exist.
 function _rejectLogin_(reason) {
   const n = _noteLoginFailure_();
-  let wait = LOGIN_FAIL_DELAY_MS;
-  if (n > LOGIN_FAIL_ESCALATE_AT) {
-    wait = Math.min(LOGIN_FAIL_DELAY_MS * (1 + (n - LOGIN_FAIL_ESCALATE_AT)), LOGIN_FAIL_MAX_DELAY_MS);
-  }
-  try { Utilities.sleep(wait); } catch (e) {}
-  try { console.warn('Login failure [' + reason + '] (' + n + ' in the last ' + (LOGIN_FAIL_WINDOW / 60) + ' min), delayed ' + wait + 'ms'); } catch (e) {}
+  try { Utilities.sleep(LOGIN_FAIL_DELAY_MS); } catch (e) {}
+  try { console.warn('Login failure [' + reason + '] (' + n + ' in the last ' + (LOGIN_FAIL_WINDOW / 60) + ' min)'); } catch (e) {}
   throw new Error("メールアドレスまたはパスワードが正しくありません。");
+}
+
+// Refused BEFORE any check: no sleep, so a flood holds no executions. Distinct from a wrong
+// password on purpose: a colleague who typed the right one must be told to wait, not that it
+// is wrong. It is identical for known and unknown names, so it reveals nothing.
+function _refuseLoginAttempt_(state) {
+  try { console.warn('Login refused [' + state + ']'); } catch (e) {}
+  if (state === "busy") throw new Error("ただいま混み合っています。少し待ってからもう一度お試しください。");
+  throw new Error("ログインの試行回数が多すぎます。15分ほど待ってからもう一度お試しください。");
 }
 
 // Email + password. The master account signs in as MASTER with the SYSTEM_PIN
@@ -1658,6 +1786,11 @@ function loginUser(email, password, device) {
   const pw = String(password == null ? "" : password);
 
   let user = null, mustSetPassword = false;
+
+  // ⚠️ FIRST, before anything reads a sheet or a password: see _reserveLoginAttempt_.
+  const slot = _reserveLoginAttempt_(id, _sessionDevice_(device));
+  if (slot.state === "limit-first") _reportLoginBlock_(id, slot.bucket);
+  if (slot.state !== "ok") _refuseLoginAttempt_(slot.state);
 
   if (id.toUpperCase() === "MASTER") {
     const sysPin = _systemPin_();
@@ -1673,12 +1806,13 @@ function loginUser(email, password, device) {
     user = { role: "master", id: "MASTER", name: "システム", email: "", notifications: false, permissions: "ALL" };
   } else {
     const acct = _findAccountByEmail_(id);
-    if (!acct) _rejectLogin_("no such email");
+    if (!acct) { _burnPasswordHash_(pw); _rejectLogin_("no such email"); }
     const v = _verifyAccountPassword_(acct.row, pw);
     if (!v.ok) _rejectLogin_("bad password");
     user = _userFromRow_(acct.row, acct.role);
     mustSetPassword = v.mustSetPassword;
   }
+  _clearLoginAttempts_(id);
 
   // Credentials have just been verified, so this is the caller. _bootPayload_
   // below calls getDashboardData and _hasPerm_, which read the parked user — a
@@ -2085,12 +2219,84 @@ function _findAccountById_(role, id) {
   return null;
 }
 
-function _passwordProblem_(pw) {
+// The account row's own details, for _commonPasswordProblem_'s personal-details rule.
+// Columns as everywhere in the account sheets: 0 ID, 1 Name, 3 Email.
+function _passwordOwner_(acct) {
+  const r = (acct && acct.row) || [];
+  return { id: String(r[0] || "").trim(), name: String(r[1] || "").trim(), email: String(r[3] || "").trim() };
+}
+
+// `who` is the account setting it ({ id, name, email }), for the personal-details rule.
+function _passwordProblem_(pw, who) {
   const v = String(pw == null ? "" : pw);
   if (v.length < PW_MIN_LENGTH) {
     return "パスワードは" + PW_MIN_LENGTH + "文字以上にしてください。";
   }
   if (/^\s|\s$/.test(v)) return "パスワードの先頭・末尾に空白は使えません。";
+  return _commonPasswordProblem_(v, who);
+}
+
+// ⚠️ COMMON PASSWORDS (2026-10-26). The login limit allows 480 guesses per account per day, so a
+// password from a common list falls in about two days (login.test §4 states the arithmetic). Length
+// alone cannot stop that: "Password2026!" is 13 characters. These rules refuse what a guessing list
+// tries first. They apply when a password is SET (completePasswordSetup / changeOwnPassword);
+// existing passwords are untouched until their owner next changes one. Temporary passwords
+// (_tempPassword_) are random and never come through here.
+const PW_COMMON_WORDS = [
+  "password", "passwd", "pass", "qwerty", "qwertz", "azerty", "asdf", "asdfgh", "zxcv",
+  "letmein", "welcome", "iloveyou", "love", "hello", "secret", "changeme", "default",
+  "admin", "administrator", "root", "login", "master", "user", "guest", "test", "temp",
+  "monkey", "dragon", "sunshine", "princess", "football", "baseball", "soccer", "shadow",
+  "superman", "batman", "starwars", "pokemon", "abc", "abcd", "abcde", "abcdef", "qazwsx",
+  "japan", "nihon", "nippon", "nihongo", "tokyo", "osaka", "honmachi", "sample", "sampleschool",
+  "school", "gakkou", "student", "teacher", "sensei"
+];
+// Keyboard and alphabet runs. Each is doubled when checked, so a run that wraps ("78901234") counts.
+const PW_RUNS = ["0123456789", "abcdefghijklmnopqrstuvwxyz", "qwertyuiop", "asdfghjkl", "zxcvbnm",
+                 "1qaz2wsx3edc4rfv5tgb", "qazwsxedcrfvtgbyhn"];
+const PW_DIGITS_MIN = 10;   // numbers only: 8 digits is a date, and staff came from PINs
+
+function _commonPasswordProblem_(pw, who) {
+  const COMMON = "よく使われるパスワードや推測しやすい並び（password、12345678、qwerty など）は使えません。";
+  const v = String(pw == null ? "" : pw);
+  const low = v.toLowerCase();
+  // One character, or one pair, repeated: aaaaaaaa, 11111111, abababab.
+  if (/^(.)\1+$/.test(low) || /^(..)\1+$/.test(low)) return COMMON;
+  // The whole password is a stretch of a run, forwards or backwards.
+  for (let i = 0; i < PW_RUNS.length; i++) {
+    const r = PW_RUNS[i] + PW_RUNS[i];
+    if (r.indexOf(low) !== -1 || r.split("").reverse().join("").indexOf(low) !== -1) return COMMON;
+  }
+  if (/^\d+$/.test(v) && v.length < PW_DIGITS_MIN) {
+    return "数字だけのパスワードは" + PW_DIGITS_MIN + "桁以上にしてください。";
+  }
+  // A common word dressed up: digits and symbols at the ends are stripped, simple substitutions
+  // undone. Symbols are mapped BEFORE the strip (so "@dmin1" keeps its a), digits only after it
+  // (so the 2026 in "Password2026" is stripped rather than read as letters).
+  const sym = low.replace(/@/g, "a").replace(/\$/g, "s");
+  const core = sym.replace(/^[^a-z]+|[^a-z]+$/g, "")
+    .replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e").replace(/4/g, "a")
+    .replace(/5/g, "s").replace(/7/g, "t");
+  if (core !== "" && (PW_COMMON_WORDS.indexOf(core) !== -1 ||
+                      PW_COMMON_WORDS.indexOf(core.replace(/i/g, "l")) !== -1)) return COMMON;
+  // A run with digits around it ("zxcvbnm123", "qwertyui2026"): the run check again, on the word.
+  if (core.length >= 5) {
+    for (let i = 0; i < PW_RUNS.length; i++) {
+      const r = PW_RUNS[i] + PW_RUNS[i];
+      if (r.indexOf(core) !== -1 || r.split("").reverse().join("").indexOf(core) !== -1) return COMMON;
+    }
+  }
+  // The account's own details. Compared without spaces, since a name is often typed run together.
+  // ⚠️ 4 characters or more: a short ID like "S01" would otherwise refuse any password containing
+  // "s01" by coincidence.
+  const w = who || {};
+  const parts = [String(w.email || "").split("@")[0], String(w.id || ""), String(w.name || "")];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i].toLowerCase().replace(/[\s　]+/g, "");
+    if (p.length >= 4 && low.replace(/[\s　]+/g, "").indexOf(p) !== -1) {
+      return "メールアドレス・名前・IDを含むパスワードは使えません。";
+    }
+  }
   return "";
 }
 
@@ -2100,9 +2306,9 @@ function _passwordProblem_(pw) {
 // The password columns are written as a 5-wide range starting at column 7, so
 // the grid must be at least ACCOUNT_COLS wide or getRange exceeds it and throws.
 //
-// Widening on demand rather than relying on migrateAddPasswordColumns having run
-// first, because the deploy-order failure here is severe: on a pre-migration
-// sheet a user logs in with their old PIN (which still works — the hash column
+// Widening on demand rather than relying on a one-off migration having run
+// first (migrateAddPasswordColumns, retired 2026-09-21), because the deploy-order
+// failure here is severe: on a pre-migration sheet a user logs in with their old PIN (which still works — the hash column
 // reads as empty), is pushed to the mandatory password-set panel, and is then
 // unable to save one. Locked out, with no way forward. Same lesson as
 // _ensureBuildingColumns_.
@@ -2140,7 +2346,7 @@ function changeOwnPassword(token, currentPassword, newPassword) {
   if (!_verifyAccountPassword_(acct.row, String(currentPassword || "")).ok) {
     throw new Error("現在のパスワードが正しくありません。");
   }
-  const problem = _passwordProblem_(newPassword);
+  const problem = _passwordProblem_(newPassword, _passwordOwner_(acct));
   if (problem) throw new Error(problem);
   if (String(newPassword) === String(currentPassword)) {
     throw new Error("新しいパスワードが現在のものと同じです。");
@@ -2168,7 +2374,7 @@ function completePasswordSetup(token, newPassword) {
     throw new Error("パスワードは設定済みです。変更は「アカウント設定」から行ってください。");
   }
 
-  const problem = _passwordProblem_(newPassword);
+  const problem = _passwordProblem_(newPassword, _passwordOwner_(acct));
   if (problem) throw new Error(problem);
 
   _writeAccountPassword_(acct, String(newPassword), false);
@@ -2216,6 +2422,16 @@ function adminResetPassword(token, targetRole, targetId) {
   }
   const acct = _findAccountById_(targetRole, targetId);
   if (!acct) throw new Error("対象のユーザーが見つかりません。");
+  // ⚠️ The temporary password comes back to the CALLER, so a reset is a sign-in as the target.
+  // saveSystemUser keeps a non-admin holding manage_users from GRANTING 管理者権限; without this
+  // they could simply BECOME a flagged colleague (finding 3, 2026-10-26). Admin-level callers
+  // may still reset each other: no escalation there.
+  // The target's level comes from its ROW through _userFromRow_, the one place a user object
+  // (and its isAdmin) is built, never from targetRole, which the browser sent.
+  const tRole = acct.sheetName === "Teacher_Master" ? "teacher" : _staffRoleFromRow_(acct.row);
+  if (_userFromRow_(acct.row, tRole).isAdmin && !_isAdminLevel_("")) {
+    throw new Error("管理者権限のあるユーザーのパスワードは、管理者またはマスターのみリセットできます。");
+  }
 
   const temp = _tempPassword_();
   _writeAccountPassword_(acct, temp, true);   // Y = force a change at next login
@@ -2331,7 +2547,7 @@ const PLACEMENT_CONFIG_SHEET = 'PlacementTest_Config';
 // The master account is its own role ("master") but ranks above admin, so every
 // admin-level gate must accept it. Routing all role tests through this helper
 // means adding a role can't silently lock the master out of one forgotten check.
-// ⚠️ These five helpers still TAKE role/perms and then, when enforcing, ignore
+// ⚠️ These five helpers still TAKE role/perms and then ignore
 // them in favour of the session (see _effectiveRole_). That looks wrong and is
 // deliberate: it fixes ~93 call sites without touching one of them, including
 // the internal calls like _bootPayload_'s. Changing the signatures instead would
@@ -2346,9 +2562,9 @@ const PLACEMENT_CONFIG_SHEET = 'PlacementTest_Config';
 //                 an interview list. A 教務部 manager holding admin power is still
 //                 教務部 for those, so this must NOT widen.
 //
-// _isAdminLevel_ — may the caller perform the seven operations no tickable
+// _isAdminLevel_ — may the caller perform the six operations no tickable
 //                 permission grants: restoreSnapshot, getSnapshotList,
-//                 getActivityLog, diagnoseInChargeMatching, deleteBuilding
+//                 getActivityLog, deleteBuilding
 //                 (cascade), saveDestinationAlias, saveDestinationOverride.
 //                 A custom role flagged 管理者権限 passes this while keeping its
 //                 own 表示名 — the point of the whole feature: a department
@@ -2370,8 +2586,7 @@ function _isAdminLevel_(role) {
   // The person's own 管理者権限. Read from the SESSION, never from an argument —
   // every caller of this asks "is the caller allowed", so the session is the right
   // subject, and a client-supplied flag would be no guard at all.
-  // ⚠️ Absent in observe mode (no session); fall through to the role answer rather
-  // than throwing, so a flip of AUTH_ENFORCE cannot take the app down.
+  // With no session there is no flag to read, and r is "" too, so this denies.
   if (_authUser && _authUser.adminUser === true) return true;
   const def = _roleByKey_(r);
   return !!(def && def.admin);
@@ -2439,7 +2654,7 @@ function _permOrLegacyRole_(role, perms, needed, legacyRoles) {
 //
 // ✅ No recursion: _isAdminLevel_ reaches _effectiveRole_, _roleByKey_ and _authUser, and
 // never comes back here.
-// ⚠️ Still fails closed with no session: _effectiveRole_ returns "" when enforcing, and
+// ⚠️ Still fails closed with no session: _effectiveRole_ returns "" then, and
 // "" is neither admin/master nor a known role, so this line denies.
 function _hasPerm_(role, perms, needed) {
   if (_isMasterRole_(role)) return true;
@@ -2631,7 +2846,17 @@ function _placementResultsUncached_(resultsUrl, tabName, rowColumns) {
     // read the full grid and trim fully-blank trailing rows ourselves.
     let maxRows = Math.min(sheet.getMaxRows(), 5000); // safety cap — a results sheet won't realistically exceed this
     let maxCols = sheet.getMaxColumns();
-    let full = sheet.getRange(1, 1, maxRows, maxCols).getDisplayValues();
+    const grid = sheet.getRange(1, 1, maxRows, maxCols);
+    let full = grid.getDisplayValues();
+    // An EXTERNAL form sheet — its formats are not ours to pin (_dateColumnFormats_), so its
+    // Date cells (the form's タイムスタンプ) would show in that file's locale. Render those
+    // cells from their VALUE instead; everything else keeps its display text.
+    const vals = grid.getValues();
+    for (let r = 0; r < full.length; r++) {
+      for (let c = 0; c < full[r].length; c++) {
+        if (Object.prototype.toString.call(vals[r][c]) === "[object Date]") full[r][c] = _dateText_(vals[r][c]);
+      }
+    }
     // Trim trailing rows that are entirely blank.
     let lastNonBlank = -1;
     for (let r = 0; r < full.length; r++) {
@@ -2802,7 +3027,7 @@ function saveSystemUser(u, adminRole, adminPerms) {
   // role "master", which _isAdminRole_ would then treat as admin-level.
   if (_isMasterRoleLiteral_(u.role)) throw new Error("この権限は付与できません。");
   // ⚠️ `admin` is likewise NEVER assignable — not even by the master. 管理者権限 on
-  // a custom role replaced it: that grants the same seven operations while the
+  // a custom role replaced it: that grants the same six operations while the
   // person still displays as their department. Leaving `admin` assignable would
   // mean two ways to grant one thing, and the one that renames somebody 管理者 on
   // every screen, which is the opposite of what the flag exists for.
@@ -2820,22 +3045,22 @@ function saveSystemUser(u, adminRole, adminPerms) {
   // dropdown is not the control.
   if (!_roleByKey_(u.role)) throw new Error("役割「" + String(u.role || "") + "」は存在しません。");
   // ⚠️ ESCALATION GUARD. `admin` is not just a permission bundle: _isAdminRole_
-  // gates seven operations that NO tickable permission grants — restoreSnapshot,
-  // getSnapshotList, getActivityLog, diagnoseInChargeMatching, deleteBuilding
+  // gates six operations that NO tickable permission grants — restoreSnapshot,
+  // getSnapshotList, getActivityLog, deleteBuilding
   // (cascade), saveDestinationAlias and saveDestinationOverride.
   //
   // Before custom roles the dropdown offered only 営業 and 教務 and the role was
   // frozen on edit, so nobody could reach `admin` through the UI at all. Making
   // roles selectable removed both of those accidental barriers at once: without
   // this line, anyone holding manage_users could edit their OWN row to `admin`
-  // and pick up all seven. So granting it is master's call, exactly like defining
+  // and pick up all six. So granting it is master's call, exactly like defining
   // a role at all.
   // ⚠️ Any admin-LEVEL role, not just the literal key. A custom role carrying
-  // 管理者権限 grants the same seven operations, so if this only checked "admin"
+  // 管理者権限 grants the same six operations, so if this only checked "admin"
   // the flag would be a way around the guard: an admin with manage_users could
   // assign themselves a department role that happens to be flagged.
   // `admin` itself is already refused above, so what is left to police here is the
-  // flag: a custom role carrying 管理者権限 grants the same seven operations, and
+  // flag: a custom role carrying 管理者権限 grants the same six operations, and
   // handing one out stays master's call. Without this an admin holding manage_users
   // could assign themselves a flagged department role.
   const _tgt = _roleByKey_(u.role);
@@ -2843,7 +3068,7 @@ function saveSystemUser(u, adminRole, adminPerms) {
     throw new Error("管理者権限のある役割の付与はマスターのみ可能です。");
   }
   // ⚠️ The per-PERSON 管理者権限 is master's call for exactly the same reason as the
-  // per-role one: it grants the seven operations no tickable permission grants. An
+  // per-role one: it grants the six operations no tickable permission grants. An
   // admin holding manage_users must not be able to tick it for themselves.
   // Requested-but-not-permitted is refused rather than silently dropped — a flag that
   // appears to save and does not is worse than an error.
@@ -2951,7 +3176,7 @@ function deleteSystemUser(id, role, adminRole, adminPerms, actorName, actorId) {
 const INTERVIEW_RESULTS_SHEET = 'Interview_Results';
 
 // Permission helper for the interview-results feature.
-// See the note on _hasPerm_: role/perms are ignored when enforcing.
+// See the note on _hasPerm_: role/perms are ignored; the session decides.
 function _hasResultPerm_(role, perms, needed) {
   if (_isMasterRole_(role)) return true;
   // ⚠️ Same line _hasPerm_ and _hasRecruitPerm_ carry, and for the same reason: this
@@ -3048,7 +3273,8 @@ function getBookingIntakeOptions(role, perms) {
 }
 
 function getInterviewResultOptions(role, perms) {
-  if (!_hasResultPerm_(role, perms, "entry_interview_results")) throw new Error("権限がありません");
+  // 入学予定者's 編集 opens the same modal, so its editors need the same dropdowns.
+  if (!_hasResultPerm_(role, perms, "entry_interview_results") && !_hasPerm_("", "", "edit_incoming")) throw new Error("権限がありません");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let teachers = [], staff = [];
 
@@ -3139,6 +3365,76 @@ function deleteInterviewResult(role, perms, rowIndex, actorName, actorId) {
   return { deleted: true };
 }
 
+// The ONE header→cell mapping for editing an Interview_Results row. 面接結果 and 入学予定者 both
+// edit through it, so a field added to one cannot be missed by the other.
+// ⚠️ Through _cellSafeRow_: 名前 / 備考 are free text, and until 2026-10-01 this wrote them
+// unwrapped — a 備考 of "=IMPORTXML(…)" became a formula.
+function _writeInterviewResultRow_(sh, rowIndex, headers, existing, entry) {
+  // ⚠️ The Timestamp goes back as its real VALUE, never its display: the display is formatted
+  // yyyy/mm/dd hh:mm (_dateColumnFormats_), so writing the text back would drop the seconds on
+  // every edit — and on a locale-formatted cell it re-parsed whatever the locale showed.
+  const raw = sh.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+  let row = headers.map(function(h, ci) {
+    if (h === "Timestamp") return raw[ci];                 // keep original timestamp
+    if (h === "EnteredBy") return (entry.__enteredBy != null && entry.__enteredBy !== "") ? entry.__enteredBy : existing[ci];
+    let v = _irEntryValue_(entry, h); // tolerant of renamed headers e.g. 点数（面接）
+    return (v != null ? v : "");
+  });
+  // The Timestamp is a real Date (or blank) and passes _cellSafe_ untouched.
+  sh.getRange(rowIndex, 1, 1, headers.length).setValues([_cellSafeRow_(row)]);
+  _bustInterviewCache_();
+
+  // A renamed result renames its bookings, or スケジュールから読み込む would import the old name
+  // again (see importResultsFromBookings). After the write: the result is saved whatever happens
+  // to the bookings, so a failure there is logged, never thrown.
+  const iName = _resultColIndex_(headers, ["名前", "氏名", "Name"]);
+  if (iName >= 0) {
+    const oldName = String(existing[iName] == null ? "" : existing[iName]).trim();
+    const newName = String(row[iName] == null ? "" : row[iName]).trim();
+    if (oldName !== "" && newName !== "" && _normResult_(oldName) !== _normResult_(newName)) {
+      try { _renameBookingsForResult_(sh, oldName, newName, rowIndex, entry.__enteredBy || ""); }
+      catch (e) { console.error("面接予約の名前変更に失敗: " + (e && e.message ? e.message : e)); }
+    }
+  }
+}
+
+// Renames the Schedule_DB bookings of a result whose 名前 changed from oldName to newName.
+// ⚠️ The bookings are found by the IMPORT's own rule — _normResult_(Student) equals the old name —
+// so after the rename the import sees exactly what it saw before. Every date and status: a
+// re-interview booking under the old name would otherwise import as a "new" student too.
+// ⚠️ Shared-name guard: if ANOTHER 面接結果 row still holds the old name, nothing is renamed. Those
+// bookings are still covered by that row, and they may be a namesake's, whose calendar must not
+// change. Returns how many bookings were renamed.
+function _renameBookingsForResult_(resultsSheet, oldName, newName, rowIndex, actorName) {
+  const oldKey = _normResult_(oldName);
+  const rData = resultsSheet.getDataRange().getDisplayValues();
+  const iName = _resultColIndex_(rData[0] || [], ["名前", "氏名", "Name"]);
+  for (let i = 1; i < rData.length; i++) {
+    if (i + 1 !== rowIndex && _normResult_(rData[i][iName]) === oldKey) return 0;
+  }
+  const sched = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Schedule_DB");
+  if (!sched) return 0;
+  // saveScheduleBatch's lock, with a fresh read inside it: rows shift and change under bookings.
+  const lock = LockService.getDocumentLock() || LockService.getScriptLock();
+  if (!lock.tryLock(15000)) throw new Error("面接スケジュールが保存中です。");
+  let n = 0;
+  try {
+    const sd = sched.getDataRange().getDisplayValues();
+    for (let i = 1; i < sd.length; i++) {
+      if (_normResult_(sd[i][6]) !== oldKey) continue;
+      sched.getRange(i + 1, 7).setValue(_cellSafe_(newName));
+      n++;
+    }
+    if (n > 0) _forgetTab_("Schedule_DB");
+  } finally {
+    lock.releaseLock();
+  }
+  if (n > 0) {
+    try { _logActivity_({ name: actorName || "" }, "面接予約の名前を変更", oldName, oldName + " → " + newName + "（" + n + "件）"); } catch (e) {}
+  }
+  return n;
+}
+
 function updateInterviewResult(role, perms, rowIndex, entry) {
   if (!_hasResultPerm_(role, perms, "entry_interview_results")) throw new Error("権限がありません");
   const sh = _getInterviewResultsSheet_();
@@ -3151,15 +3447,7 @@ function updateInterviewResult(role, perms, rowIndex, entry) {
   entry = entry || {};
 
 
-  const existing = allData[rowIndex - 1]; // 0-based array index for this sheet row
-  let row = headers.map(function(h, ci) {
-    if (h === "Timestamp") return existing[ci];            // keep original timestamp
-    if (h === "EnteredBy") return (entry.__enteredBy != null && entry.__enteredBy !== "") ? entry.__enteredBy : existing[ci];
-    let v = _irEntryValue_(entry, h); // tolerant of renamed headers e.g. 点数（面接）
-    return (v != null ? v : "");
-  });
-  sh.getRange(rowIndex, 1, 1, headers.length).setValues([row]);
-  _bustInterviewCache_();
+  _writeInterviewResultRow_(sh, rowIndex, headers, allData[rowIndex - 1], entry);
 
   try { _logActivity_({ role: role, name: entry.__enteredBy || "", id: entry.__enteredById || "" }, "面接結果を編集", (entry["名前"] || entry["氏名"] || ""), ""); } catch (e) {}
   return { saved: true };
@@ -3176,11 +3464,461 @@ function _bustInterviewCache_() {
 
 function getInterviewResults(role, perms) {
   if (!_hasResultPerm_(role, perms, "view_interview_results")) throw new Error("権限がありません");
-  const data = _cached_('interviewResults', CACHE_TTL_SHORT, function () {
+  const data = _interviewResultsData_();
+  return data.length > 0 ? data : [["データがありません"]];
+}
+
+// The one cached read of Interview_Results, shared by 面接結果 and 入学予定者. Callers guard first.
+function _interviewResultsData_() {
+  return _cached_('interviewResults', CACHE_TTL_SHORT, function () {
     _getInterviewResultsSheet_();   // ensure it exists before the batched read
     return _readTabs_([INTERVIEW_RESULTS_SHEET])[INTERVIEW_RESULTS_SHEET] || [];
   });
-  return data.length > 0 ? data : [["データがありません"]];
+}
+
+// ============================================================================
+// 入学予定者 (学生一覧) — the 面接結果 rows whose 申請 is ○, with their cancellation.
+//
+// ⚠️ NO NEW STORE. The list is Interview_Results; a cancellation is a Recruitment_Cancel row,
+// the SAME record 募集状況's キャンセル tables show and subtract from its grid and 定員・残枠.
+// Decided 2026-10-01: one record, so the two screens can never disagree.
+//
+// ⚠️ The two sheets share no id, so a person is joined by 入学期 + a shared writing of 名前 — this
+// file's oldest bug class. The join is strict about it: more than one match on either side is
+// "ambiguous", shown as 要確認, and every change to it is REFUSED rather than guessed.
+// ============================================================================
+const INCOMING_CANCEL_KINDS = ["申請キャンセル", "申請取り下げ", "COE後キャンセル"];
+// ビザ変更 is a row in 募集状況's 留学ビザ以外 roster, NOT a decision: it replaces only the
+// automatic 書類準備中 / 申請中 / 入学予定 (no COE application), and a キャンセル or 不交付 still
+// overrides it while the roster row stays (decided 2026-10-02).
+const INCOMING_VISA_STATE = "ビザ変更";
+
+// ○ is what the 申請 select writes; 〇 / ◯ are what a hand edit in the sheet tends to hold.
+function _isApplied_(v) {
+  return /^[○〇◯]$/.test(String(v == null ? "" : v).trim());
+}
+
+// A name as its writings (_nameVariants_): 「王小明 (WANG XIAOMING)」 → [[王小明], [wang, xiaoming]].
+// Two names on this screen are the same person when they share a writing, so 募集状況's
+// 「WANG XIAOMING」 or 「王小明」 finds the 面接結果 row 「王小明 (WANG XIAOMING)」.
+function _incomingWritings_(name) {
+  return _nameVariants_(name);
+}
+
+// ⚠️ Equality, not _namesMatch_'s subset rule: this join WRITES (a decision lands on the person
+// it finds). Two writings are equal as word sets — a one-word 「王小明」 counts here only because it
+// must equal the other side whole — or word for word with initials (「JOHN S DOE」 = 「Doe, Someone
+// John」), which is _namesMatch_ on two names of the same length.
+function _incomingSameName_(wa, wb) {
+  const key = function (t) { return t.slice().sort().join(" "); };
+  return wa.some(function (a) {
+    return wb.some(function (b) { return key(a) === key(b) || (a.length === b.length && _namesMatch_(a, b)); });
+  });
+}
+
+// Accent marks off: 「Nguyễn」 → 「Nguyen」. NFD splits a letter from its marks and the strip drops
+// the marks; the map covers letters NFD does NOT decompose — \u0110 above all, since Vietnamese 「\u0110ặng」
+// must equal 「Dang」. ⚠️ Kept OUT of _normName_, which backs ~90 other lookups; and written as \u
+// escapes, never raw combining characters (an invisible byte in source is a trap here, cellsafe §7).
+// The client's _foldAccents is a twin; tests/incoming.test.js keeps the two maps identical.
+const ACCENT_MAP = { "\u0111": "d", "\u0110": "D", "\u00f8": "o", "\u00d8": "O", "\u0142": "l", "\u0141": "L",
+  "\u00df": "ss", "\u00e6": "ae", "\u00c6": "AE", "\u0153": "oe", "\u0152": "OE", "\u0131": "i" };
+function _foldAccents_(v) {
+  return String(v == null ? "" : v).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u0111\u0110\u00f8\u00d8\u0142\u0141\u00df\u00e6\u00c6\u0153\u0152\u0131]/g, function (c) { return ACCENT_MAP[c]; });
+}
+
+// A person's name as its words, each folded like _normName_ (width, case) after accents come off.
+// The ONE folding: _nameTokensKey_ is its sorted join. Full stops and commas separate words too:
+// 「J.S. Doe」 → [j, s, doe], 「Doe, S. John」 → [doe, s, john] (、，． as well).
+function _nameTokens_(v) {
+  return _foldAccents_(v).split(/[\s\u3000\u00A0.,\uFF0E\uFF0C\u3001]+/)
+    .map(function (w) { return _normName_(w); })
+    .filter(function (w) { return w !== ""; });
+}
+
+// A name as its alternatives: 「王小明 (WANG XIAOMING)」 → [[王小明], [wang, xiaoming]]. Bracketed
+// text is ANOTHER WRITING of the same name (a Chinese name with its romanisation), never extra
+// words: merged into one list, 「李明 (LI MING)」 would need 「李明」 inside the passport's
+// 「LI MING HUA」 and miss. ( ) and （ ）; a stray bracket is a space. No brackets → exactly
+// [_nameTokens_(v)], so every unbracketed name matches as before.
+function _nameVariants_(v) {
+  let groups = [];
+  const outside = String(v == null ? "" : v).replace(/[(（]([^()（）]*)[)）]/g, function (m, g) {
+    groups.push(g);
+    return " ";
+  }).replace(/[()（）]/g, " ");
+  return [outside].concat(groups).map(_nameTokens_).filter(function (t) { return t.length > 0; });
+}
+
+// Order-free key: 「SAMPLE TARO」 and 「taro　sample」 are the same. "" when there is no name.
+function _nameTokensKey_(v) {
+  return _nameTokens_(v).slice().sort().join(" ");
+}
+
+// One Latin letter: 「S」 of 「John S. Doe」. ⚠️ Latin only — a lone CJK character (「李 明」) is a
+// whole name part, never an initial that would match every word starting with it.
+function _isInitial_(w) {
+  return /^[a-z]$/.test(w);
+}
+
+// Two names are the same person when every word of the SHORTER pairs with its own word of the
+// longer, either way round and in any order — a 面接結果 name routinely drops the middle names a
+// passport carries (「SAMPLE MORGAN」 vs 「SAMPLE RIVERA ALEX MORGAN」). A pair is the same word,
+// or an initial and a word starting with it (「John S. Doe」 = 「John Someone Doe」, either side).
+// ⚠️ At least TWO pairs must be the SAME word: one shared word (a family name) is not a person,
+// and an initial only fills a gap — 「J. Doe」 must not catch 「Jane Doe」. With no initials every
+// pair is a same-word pair, so this is the plain subset rule. Callers compare nationality separately.
+const NAME_MATCH_MIN_WORDS = 2;
+function _namesMatch_(a, b) {
+  const s = a.length <= b.length ? a : b, l = s === a ? b : a;
+  let used = l.map(function () { return false; });
+  // Same-word pairs are tried before initials; backtracking covers the rest (a name is a few words).
+  const pair = function (i, same) {
+    if (i === s.length) return same >= NAME_MATCH_MIN_WORDS;
+    const w = s[i];
+    for (let pass = 0; pass < 2; pass++) {
+      for (let j = 0; j < l.length; j++) {
+        if (used[j]) continue;
+        const x = l[j];
+        const ok = pass === 0 ? x === w
+          : x !== w && ((_isInitial_(w) && x.charAt(0) === w) || (_isInitial_(x) && w.charAt(0) === x));
+        if (!ok) continue;
+        used[j] = true;
+        if (pair(i + 1, same + (pass === 0 ? 1 : 0))) return true;
+        used[j] = false;
+      }
+    }
+    return false;
+  };
+  return pair(0, 0);
+}
+
+// Any writing of one name matches any writing of the other (_nameVariants_ on both sides).
+function _anyNamesMatch_(va, vb) {
+  return va.some(function (a) { return vb.some(function (b) { return _namesMatch_(a, b); }); });
+}
+
+// yyyy/m/d or yyyy-m-d → zero-padded yyyy-mm-dd, so dates compare as strings. "" for anything
+// else: an unreadable date is never guessed.
+function _isoDay_(v) {
+  const m = String(v == null ? "" : v).trim().match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  return m ? m[1] + "-" + ("0" + m[2]).slice(-2) + "-" + ("0" + m[3]).slice(-2) : "";
+}
+
+// 入学期 → "YYYY-MM": 「2026年10月生」 → "2026-10", 「2027年4月生」 → "2027-04" (padded, so it equals
+// _intakeKeyFromStudentId_'s key for 202704…). "" for anything unreadable — never guessed.
+function _intakeKeyFromIntakeName_(s) {
+  const m = String(s == null ? "" : s).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+  if (!m) return "";
+  const mo = parseInt(m[2], 10);
+  return mo >= 1 && mo <= 12 ? m[1] + "-" + (mo < 10 ? "0" + mo : String(mo)) : "";
+}
+
+// Everyone who is or was a student here, as { country: [{ variants, src, intake }, …] }:
+// Central_DB (src "central", on 在籍学生) and Past_DB (src "past": graduates, early graduates,
+// drop-outs). ⚠️ Columns by header NAME — and the nationality header DIFFERS: 国名 in Central_DB,
+// 国籍 in Past_DB. A row missing a name or a nationality is left out, so two blanks never mean
+// "same person". `intake` is the 学籍番号's YYYYMM prefix ("" when unreadable or the column is
+// missing, which then matches nobody).
+function _enrolledIndex_() {
+  const tabs = _readTabs_(["Central_DB", "Past_DB"]);
+  let idx = {};
+  const sources = [
+    [tabs.Central_DB, "central", "国名"],
+    [tabs.Past_DB,    "past",    "国籍"]
+  ];
+  sources.forEach(function (t) {
+    const data = t[0] || [];
+    const h = data[0] || [];
+    const iName = h.indexOf("名前英語"), iNat = h.indexOf(t[2]), iId = h.indexOf("学籍番号");
+    if (iName < 0 || iNat < 0) return;
+    for (let i = 1; i < data.length; i++) {
+      const n = _nameVariants_(data[i][iName]), c = _countryKey_(data[i][iNat]);
+      if (n.length && c !== "") {
+        (idx[c] = idx[c] || []).push({ variants: n, src: t[1], intake: iId >= 0 ? _intakeKeyFromStudentId_(data[i][iId]) : "" });
+      }
+    }
+  });
+  return idx;
+}
+
+// A country as one key, whether written short or official: 「イラン」 = 「イラン・イスラム共和国」,
+// 「ベトナム」 = 「ベトナム社会主義共和国」, 「ネパール」 = 「ネパール連邦民主共和国」. The 「・」 goes,
+// then form-of-government words come off the END, repeatedly. ⚠️ Never a prefix rule: 「インド」 is
+// a prefix of 「インドネシア」. ⚠️ A strip never leaves fewer than 2 characters, so 「中国」 / 「韓国」 /
+// 「英国」 keep their 国. Names that are not short + suffix are in COUNTRY_ALIASES.
+const COUNTRY_SUFFIXES = ["共和国", "合衆国", "首長国", "連邦", "王国", "民主", "人民", "社会主義", "イスラム", "国"];
+const COUNTRY_ALIASES = { "中華人民共和国": "中国", "大韓民国": "韓国", "中華民国": "台湾" };
+function _countryKey_(v) {
+  let s = _normName_(v).replace(/[・･·]/g, "");
+  if (COUNTRY_ALIASES[s]) return COUNTRY_ALIASES[s];
+  for (let again = true; again; ) {
+    again = false;
+    for (let k = 0; k < COUNTRY_SUFFIXES.length; k++) {
+      const x = COUNTRY_SUFFIXES[k];
+      if (s.length - x.length >= 2 && s.slice(-x.length) === x) { s = s.slice(0, -x.length); again = true; break; }
+    }
+  }
+  return s;
+}
+
+// "central", "past" or null. Central wins: someone on 在籍学生 now is reported as that.
+// ⚠️ THE SAME ENROLMENT, not just the same person: the student's 学籍番号 intake (202610… =
+// 2026年10月) must EQUAL this application's 入学期, besides name and 国籍. An unreadable intake on
+// either side is no match — the student stays listed rather than vanish on a guess. A former
+// student who applies again has an older 学籍番号, so they stay listed too (this replaced the
+// 始業日 rule). ⚠️ 学籍番号 is never reissued, so a student who changed course carries the intake
+// they LEFT and does not match their new one: accepted (decided 2026-10-02, over the コース
+// cell's 期 prefix that _enrolmentByIntakeMonthUncached_ prefers).
+function _isEnrolled_(name, nationality, intake, idx) {
+  const c = _countryKey_(nationality), n = _nameVariants_(name), it = _intakeKeyFromIntakeName_(intake);
+  if (c === "" || !n.length || it === "") return null;
+  let found = null;
+  (idx[c] || []).forEach(function (e) {
+    if (found === "central" || e.intake !== it || !_anyNamesMatch_(n, e.variants)) return;
+    found = e.src;
+  });
+  return found;
+}
+
+// 入学期 → its 申請日 (募集状況's 日程, Recruitment_Notes column 6) and 結果日 (column 7), as
+// yyyy-mm-dd. Those columns are pinned to yyyy-mm-dd; yyyy/mm/dd is accepted too (_isoDay_),
+// anything else is left out — never guessed.
+function _incomingIntakeDates_() {
+  const data = _getNoteSheet_().getDataRange().getDisplayValues();
+  let apply = {}, result = {};
+  for (let i = 1; i < data.length; i++) {
+    const it = String(data[i][0] || "").trim();
+    if (!it) continue;
+    const a = _isoDay_(data[i][5]), r = _isoDay_(data[i][6]);
+    if (a) apply[it] = a;
+    if (r) result[it] = r;
+  }
+  return { apply: apply, result: result };
+}
+
+function _incomingToday_() {
+  return Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd");
+}
+
+// A roster (キャンセル or 不交付) as 入学期 → [{ writings, kind, sheetRow }]. Both are 募集状況's own
+// records, one row per person; a person is found within the intake by _incomingSameName_.
+function _incomingRosterIndex_(data, nameCol, kindOf) {
+  let idx = {};
+  for (let i = 1; i < data.length; i++) {
+    const w = _incomingWritings_(data[i][nameCol]);
+    if (!w.length) continue;
+    const it = String(data[i][0] == null ? "" : data[i][0]).trim();
+    (idx[it] = idx[it] || []).push({ writings: w, kind: kindOf(data[i]), sheetRow: i + 1 });
+  }
+  return idx;
+}
+
+// The entries of an intake's list that share a writing with `writings`.
+function _incomingHits_(list, writings) {
+  return (list || []).filter(function (e) { return _incomingSameName_(e.writings, writings); });
+}
+
+function getIncomingStudents() {
+  if (!_hasPerm_("", "", "view_incoming")) throw new Error("権限がありません");
+  const data = _interviewResultsData_();
+  const headers = data[0] || [];
+  const col = function (names) { return _resultColIndex_(headers, names); };
+  const iApp = col(["申請"]), iIntake = col(["入学期"]), iName = col(["名前", "氏名", "Name"]), iNat = col(["国籍"]);
+  const today = _incomingToday_();
+  if (iApp < 0 || iName < 0) {
+    return { headers: headers, rows: [], meta: [], hiddenEnrolled: {}, hiddenPast: {}, applyDates: {}, resultDates: {}, today: today };
+  }
+  const enrolled = _enrolledIndex_();
+  const dates = _incomingIntakeDates_();
+
+  // A decision lives in ONE of 募集状況's two rosters: キャンセル (入学期|種別|国籍|名前|…) or
+  // 不交付 (入学期|国籍|名前|…). One read each.
+  const cIdx = _incomingRosterIndex_(_getCancelSheet_().getDataRange().getDisplayValues(), 3, function (r) { return String(r[1] || "").trim(); });
+  const nIdx = _incomingRosterIndex_(_getNotIssuedSheet_().getDataRange().getDisplayValues(), 2, function () { return "不交付"; });
+  // 留学ビザ以外 (入学期|番号|国籍|名前|…): a hit there is ビザ変更.
+  const vIdx = _incomingRosterIndex_(_getOtherVisaSheet_().getDataRange().getDisplayValues(), 3, function () { return INCOMING_VISA_STATE; });
+
+  let rows = [], applicants = {};
+  for (let i = 1; i < data.length; i++) {
+    if (!_isApplied_(data[i][iApp]) || _normName_(data[i][iName]) === "") continue;
+    const r = data[i].slice();
+    r._sheetRow = i + 1;
+    r._stamp = String(data[i][0] || "");
+    r._intake = iIntake >= 0 ? String(data[i][iIntake] == null ? "" : data[i][iIntake]).trim() : "";
+    r._writings = _incomingWritings_(data[i][iName]);
+    (applicants[r._intake] = applicants[r._intake] || []).push({ writings: r._writings });
+    rows.push(r);
+  }
+  // Rows are plain arrays; their extra properties do not survive google.script.run, so the
+  // per-row facts travel in a parallel list.
+  //
+  // ⚠️ A DECISION is a キャンセル or a 不交付. Two hits on one key, or hits in BOTH rosters, are a
+  // conflict (要確認): never guessed. An ENROLLED student (Central_DB / Past_DB) leaves the list
+  // unless a decision is recorded — those contradict being enrolled, so the row stays as 要確認.
+  // 入学予定 is NOT stored: an undecided student becomes it on the intake's 結果日 (decided
+  // 2026-10-01), and an enrolled one with no decision is the expected path, so hidden.
+  let outRows = [], meta = [], hiddenEnrolled = {}, hiddenPast = {};
+  rows.forEach(function (r) {
+    const ch = _incomingHits_(cIdx[r._intake], r._writings), nh = _incomingHits_(nIdx[r._intake], r._writings);
+    // The applicant side of the ambiguity: how many ○ rows in this intake the ONE hit names.
+    // ⚠️ Counted from the hit's writings, not this row's: 「WANG XIAOHONG」 names one 王小明 even
+    // when another 王小明 applied in the same intake.
+    const hit = ch.length + nh.length === 1 ? (ch[0] || nh[0]) : null;
+    const same = hit ? _incomingHits_(applicants[r._intake], hit.writings).length : 0;
+    // ビザ変更 is ambiguous the same two ways, and is 要確認 like a decision would be.
+    const vh = _incomingHits_(vIdx[r._intake], r._writings);
+    const vSame = vh.length === 1 ? _incomingHits_(applicants[r._intake], vh[0].writings).length : 0;
+    const conflict = ch.length + nh.length > 1 || (ch.length + nh.length === 1 && same > 1) ||
+                     vh.length > 1 || vSame > 1;
+    const visa = !conflict && vh.length === 1;
+    const decided = conflict ? null : (ch.length ? ch[0].kind : (nh.length ? "不交付" : null));
+    const src = iNat >= 0 ? _isEnrolled_(r[iName], r[iNat], r._intake, enrolled) : null;
+    const isEnrolled = src !== null;
+    const intake = r._intake;
+    if (isEnrolled && !conflict && decided === null) {
+      const bucket = src === "past" ? hiddenPast : hiddenEnrolled;
+      bucket[intake] = (bucket[intake] || 0) + 1;
+      return;
+    }
+    // String compares are safe: zero-padded yyyy-mm-dd both sides. ON the day counts, for both.
+    const applied = !!dates.apply[intake] && today >= dates.apply[intake];
+    const planned = !!dates.result[intake] && today >= dates.result[intake];
+    outRows.push(r.slice());
+    meta.push({ sheetRow: r._sheetRow, stamp: r._stamp, decided: decided, conflict: conflict,
+                enrolledToo: isEnrolled && (conflict || decided !== null), enrolledSrc: src,
+                visa: visa, applied: applied, planned: planned });
+  });
+  return { headers: headers, rows: outRows, meta: meta, hiddenEnrolled: hiddenEnrolled, hiddenPast: hiddenPast,
+           applyDates: dates.apply, resultDates: dates.result, today: today };
+}
+
+// Re-reads one Interview_Results row and proves it is still the one the browser loaded. Rows
+// shift on every delete, so a bare row number can point at somebody else by the time it is used.
+function _incomingRowAt_(sh, rowIndex, stamp) {
+  const all = sh.getDataRange().getDisplayValues();
+  const ri = parseInt(rowIndex, 10);
+  if (isNaN(ri) || ri < 2 || ri > all.length) throw new Error("対象の学生が見つかりません。再読み込みしてください。");
+  if (String(all[ri - 1][0] || "") !== String(stamp == null ? "" : stamp)) {
+    throw new Error("一覧が古くなっています。再読み込みしてください。");
+  }
+  return { headers: all[0] || [], row: all[ri - 1], rowIndex: ri };
+}
+
+function updateIncomingStudent(rowIndex, stamp, entry) {
+  if (!_hasPerm_("", "", "edit_incoming")) throw new Error("権限がありません");
+  const sh = _getInterviewResultsSheet_();
+  const at = _incomingRowAt_(sh, rowIndex, stamp);
+  entry = entry || {};
+  _writeInterviewResultRow_(sh, at.rowIndex, at.headers, at.row, entry);
+  try { _logActivity_({}, "入学予定者を編集", (entry["名前"] || entry["氏名"] || ""), ""); } catch (e) {}
+  return { saved: true };
+}
+
+// state: "" (back one level), 不交付, ビザ変更, or one of INCOMING_CANCEL_KINDS. Writes 募集状況's
+// OWN records: a cancel kind → its キャンセル roster, 不交付 → its 不交付 roster, ビザ変更 → its
+// 留学ビザ以外 roster. ⚠️ EXCLUSIVE between the DECISIONS: a person holds at most one, so setting
+// either deletes the other. ビザ変更 sits beneath them: setting it clears any decision, a decision
+// leaves the 留学ビザ以外 row alone, and "" removes the decision if there is one, else the
+// 留学ビザ以外 row. 入学予定 is never written — it is what an undecided student becomes on the 結果日.
+// Returns { state: the decision now or "", visa: whether a 留学ビザ以外 row holds them }.
+function setIncomingState(rowIndex, stamp, state) {
+  if (!_hasPerm_("", "", "edit_incoming")) throw new Error("権限がありません");
+  const k = String(state == null ? "" : state).trim();
+  if (k !== "" && k !== "不交付" && k !== INCOMING_VISA_STATE && INCOMING_CANCEL_KINDS.indexOf(k) === -1) throw new Error("種別が不正です。");
+
+  // The same lock 募集状況's addCancelRow takes: appends and deletes on these sheets.
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); }
+  catch (e) { throw new Error("処理が混み合っています。もう一度お試しください。"); }
+  try {
+    const at = _incomingRowAt_(_getInterviewResultsSheet_(), rowIndex, stamp);
+    const h = at.headers, row = at.row;
+    const pick = function (names) { const i = _resultColIndex_(h, names); return i >= 0 ? String(row[i] || "").trim() : ""; };
+    const intake = pick(["入学期"]), name = pick(["名前", "氏名", "Name"]);
+    if (intake === "") throw new Error("入学期を設定してください（編集から入力できます）。");
+    if (_normName_(name) === "") throw new Error("名前を設定してください（編集から入力できます）。");
+    const writings = _incomingWritings_(name);
+
+    // The same join getIncomingStudents shows: within the intake, any shared writing of the name.
+    const cs = _getCancelSheet_(), ns = _getNotIssuedSheet_(), vs = _getOtherVisaSheet_();
+    const kindless = function () { return ""; };
+    const hitsOf = function (data, nameCol) {
+      return _incomingHits_(_incomingRosterIndex_(data, nameCol, kindless)[intake], writings);
+    };
+    const cData = cs.getDataRange().getDisplayValues(), nData = ns.getDataRange().getDisplayValues(),
+          vData = vs.getDataRange().getDisplayValues();
+    const cHits = hitsOf(cData, 3), nHits = hitsOf(nData, 2), vHits = hitsOf(vData, 3);
+    const ch = cHits.map(function (e) { return e.sheetRow; }), nh = nHits.map(function (e) { return e.sheetRow; }),
+          vh = vHits.map(function (e) { return e.sheetRow; });
+    // The applicant side of the ambiguity: how many ○ rows in this intake the record names —
+    // the existing hit's writings, or, with no hit, this name's (the row about to be appended).
+    const named = (cHits[0] || nHits[0] || { writings: writings }).writings;
+    const ir = _interviewResultsData_(), iA = _resultColIndex_(ir[0] || [], ["申請"]),
+          iI = _resultColIndex_(ir[0] || [], ["入学期"]), iN = _resultColIndex_(ir[0] || [], ["名前", "氏名", "Name"]);
+    const namedCount = function (w) {
+      let n = 0;
+      for (let i = 1; i < ir.length; i++) {
+        if (_isApplied_(ir[i][iA]) && String(iI >= 0 ? ir[i][iI] || "" : "").trim() === intake &&
+            _incomingSameName_(_incomingWritings_(ir[i][iN]), w)) n++;
+      }
+      return n;
+    };
+    const same = namedCount(named);
+    // The 留学ビザ以外 row, likewise: an existing one by its own writings, a new one by this name's.
+    const vSame = k === INCOMING_VISA_STATE || vHits.length ? namedCount((vHits[0] || { writings: writings }).writings) : 0;
+    if (ch.length > 1 || nh.length > 1 || (ch.length && nh.length) || same > 1 || vh.length > 1 || vSame > 1) {
+      throw new Error("同じ入学期・名前の記録が複数あるため変更できません。募集状況のキャンセル・不交付・留学ビザ以外で確認してください。");
+    }
+
+    const decidedBefore = ch.length ? String(cData[ch[0] - 1][1] || "") : (nh.length ? "不交付" : "");
+    const before = decidedBefore || (vh.length ? INCOMING_VISA_STATE : "");
+    const drop = function (sh, ri) {
+      const full = _sheetRowForLog_(sh, ri);
+      sh.deleteRow(ri);
+      try { _logActivity_({}, "入学予定者の状態", name, before + " → " + (k || "(自動)") + " / " + full); } catch (e) {}
+    };
+    // Clear whatever roster does NOT hold the new state. "" with no decision steps back from
+    // ビザ変更, so it is the 留学ビザ以外 row that goes.
+    const clearDecision = k === "" || k === INCOMING_VISA_STATE;
+    if (ch.length && (clearDecision || k === "不交付")) drop(cs, ch[0]);
+    if (nh.length && k !== "不交付") drop(ns, nh[0]);
+    let visaNow = vh.length > 0;
+    if (k === "" && !decidedBefore && vh.length) { drop(vs, vh[0]); visaNow = false; }
+
+    if (k === INCOMING_VISA_STATE && !vh.length) {
+      // ⚠️ Positional, like _getOtherVisaRows_: 入学期|番号|国籍|名前|現在のビザ|ビザ変更|課程|担当|松野|学費.
+      // 番号 is the next within the intake, under this lock — addOtherVisaRow's rule.
+      let maxNo = 0;
+      for (let i = 1; i < vData.length; i++) {
+        if (String(vData[i][0] || "").trim() !== intake) continue;
+        const n = parseInt(vData[i][1], 10);
+        if (!isNaN(n) && n > maxNo) maxNo = n;
+      }
+      vs.appendRow(_cellSafeRow_([intake, maxNo + 1, pick(["国籍"]), name, "", "", pick(["課程"]), pick(["担当"]), "", ""]));
+      visaNow = true;
+    }
+
+    if (k === "不交付" && !nh.length) {
+      // ⚠️ Positional, like _getNotIssuedRows_: 入学期|国籍|名前|課程|担当.
+      ns.appendRow(_cellSafeRow_([intake, pick(["国籍"]), name, pick(["課程"]), pick(["担当"])]));
+    } else if (INCOMING_CANCEL_KINDS.indexOf(k) !== -1) {
+      if (ch.length) {
+        // 種別 only: 国籍 / 課程 / 担当 decide the 募集状況 grid cell, and may have been corrected there.
+        cs.getRange(ch[0], 2).setValue(k);
+      } else {
+        // ⚠️ Positional, like _getCancelRows_ / saveCancelCell: 入学期|種別|国籍|名前|課程|担当.
+        cs.appendRow(_cellSafeRow_([intake, k, pick(["国籍"]), name, pick(["課程"]), pick(["担当"])]));
+      }
+    }
+    if (k !== "" && before !== k) {
+      try { _logActivity_({}, "入学予定者の状態", name, (before || "(自動)") + " → " + k); } catch (e) {}
+    }
+    return { state: k === INCOMING_VISA_STATE ? "" : k, visa: visaNow };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // Check for a likely duplicate by cross-matching 氏名 + 国籍 + 年齢.
@@ -3210,16 +3948,29 @@ function checkInterviewResultDuplicate(role, perms, name, nationality, age) {
   return { duplicate: matches.length > 0, matches: matches };
 }
 
-// Save one interview-result entry. `entry` is an object keyed by header name.
-// `force` skips the duplicate guard (used after the user confirms).
 // Pull booked interviews from Schedule_DB into Interview_Results as skeleton
 // rows that people fill in (点数, 合否, etc.) later. On-demand (button-driven).
 // Rules, per design:
 //   • only Booked interviews whose date is on or before today (same-day allowed),
-//   • dedup on 名前 + 日付 — skip any booking that already has a result row for
-//     that student on that date (so re-running only adds what's new),
+//   • one result record per student, ever: dedup on NAME ALONE — a booking is skipped when its
+//     student already has any result row (including from an earlier interview or a re-interview),
 //   • fields copied from the booking: 日付, 名前, 国籍, 課程, 入学期, 担当, 備考;
 //     everything else (scores, 合否, …) is left blank for the interviewer.
+//
+// ⚠️ NAME-ONLY DEDUP NEEDS THE NAMES TO AGREE. A result renamed after import (a typo fixed, a
+// passport name) left its booking under the old name, so every press imported it again. Since
+// 2026-10-05 a rename in the app renames the bookings too (_renameBookingsForResult_, called from
+// _writeInterviewResultRow_). A name changed by hand in the spreadsheet bypasses that and is
+// imported once more.
+//
+// Schedule_DB col 26 (Result_Imported_At) records WHEN a booking became a result row. It is a
+// record kept for later use, NOT a dedup key: slot rows are reused (a cancel writes cols 6–12 back
+// to Available and the next booking lands in the same row), so a mark on the row would outlive its
+// booking. No other writer touches col 26.
+const SCHED_IMPORT_AT_COL = 26;     // Result_Imported_At
+// A re-interview is a second booking for a student who already has a result, so the import
+// leaves it out. Staff mark it by writing 再面接 in the booking's 備考 or in the student name.
+const SCHED_REINTERVIEW_MARK = "再面接";
 function importResultsFromBookings(role, perms, actorName, actorId) {
   if (!_hasResultPerm_(role, perms, "entry_interview_results")) throw new Error("権限がありません");
 
@@ -3227,15 +3978,23 @@ function importResultsFromBookings(role, perms, actorName, actorId) {
   const sched = ss.getSheetByName("Schedule_DB");
   if (!sched) return { added: 0, skipped: 0, message: "面接スケジュールのデータが見つかりません。（SYS-01）" };
 
+  // saveScheduleBatch's lock: a booking saved mid-import must not interleave with the stamp
+  // write, and two people pressing at once must not both import.
+  const lock = LockService.getDocumentLock() || LockService.getScriptLock();
+  if (!lock.tryLock(15000)) throw new Error("他の保存処理中です。もう一度お試しください。");
+  try {
+    return _importResultsFromBookingsLocked_(sched, role, actorName, actorId);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _importResultsFromBookingsLocked_(sched, role, actorName, actorId) {
   const sh = _getInterviewResultsSheet_();
   const rData = sh.getDataRange().getDisplayValues();
   const headers = rData[0];
   const riName = _resultColIndex_(headers, ["名前", "氏名", "Name"]);
 
-  // One result record per student, ever: dedup on NAME ALONE. If a student
-  // already has any result row (including from an earlier interview or a
-  // re-interview), the import skips them — re-interviews of students who
-  // already have a record never create a second blank row.
   let existing = {};
   for (let i = 1; i < rData.length; i++) {
     let nm = _normResult_(rData[i][riName]);
@@ -3246,7 +4005,7 @@ function importResultsFromBookings(role, perms, actorName, actorId) {
   let today = new Date(); today.setHours(23, 59, 59, 999);
 
   const sd = sched.getDataRange().getDisplayValues();
-  let toAppend = [], seenThisRun = {}, skipped = 0;
+  let toAppend = [], importedRows = [], seenThisRun = {}, skipped = 0, reinterview = 0;
   for (let i = 1; i < sd.length; i++) {
     let status = String(sd[i][5] || "").trim();
     let student = String(sd[i][6] || "").trim();
@@ -3255,6 +4014,11 @@ function importResultsFromBookings(role, perms, actorName, actorId) {
     let rawDate = sd[i][3];
     let d = _parseSheetDate_(rawDate);
     if (!d || d.getTime() > today.getTime()) continue; // future bookings excluded
+
+    // ⚠️ Before the dedup: a marked booking must not claim the name, or the same student's
+    // first-interview booking would be skipped as "already seen".
+    if (student.indexOf(SCHED_REINTERVIEW_MARK) !== -1 ||
+        String(sd[i][24] || "").indexOf(SCHED_REINTERVIEW_MARK) !== -1) { reinterview++; continue; }
 
     let key = _normResult_(student);
     if (existing[key] || seenThisRun[key]) { skipped++; continue; }
@@ -3276,6 +4040,7 @@ function importResultsFromBookings(role, perms, actorName, actorId) {
       return (vals[h] != null) ? vals[h] : "";
     });
     toAppend.push(row);
+    importedRows.push(i);
   }
 
   if (toAppend.length > 0) {
@@ -3283,9 +4048,31 @@ function importResultsFromBookings(role, perms, actorName, actorId) {
     sh.getRange(sh.getLastRow() + 1, 1, toAppend.length, headers.length).setValues(toAppend);
     _bustInterviewCache_();
     _logActivity_({ role: role, name: actorName || "", id: actorId || "" }, "面接予約から結果を取込", INTERVIEW_RESULTS_SHEET, toAppend.length + "件");
+    _stampImportedBookings_(sched, sd.length - 1, importedRows);
   }
-  return { added: toAppend.length, skipped: skipped,
-           message: toAppend.length + "件を取り込みました。" + (skipped > 0 ? "（既に存在する " + skipped + " 件はスキップ）" : "") };
+  return { added: toAppend.length, skipped: skipped, reinterview: reinterview,
+           message: toAppend.length + "件を取り込みました。" + (skipped > 0 ? "（既に存在する " + skipped + " 件はスキップ）" : "") +
+             (reinterview > 0 ? "（再面接 " + reinterview + " 件は対象外）" : "") };
+}
+
+// Result_Imported_At on the bookings that just became result rows (`rows` are 1-based data
+// indices into the display read, so sheet row = index + 1). ONE write for the whole column,
+// built from a RAW read so every other cell goes back as it was. ⚠️ Text must stay text: a
+// "yyyy-MM-dd HH:mm" string is re-flagged with Sheets' apostrophe on EVERY write — a raw read
+// hands it back without one, and written bare it would be parsed into a Date (_sessionStamp_'s
+// rule). A Date already there is written back as the Date.
+function _stampImportedBookings_(sched, n, rows) {
+  if (n <= 0 || !rows.length) return;
+  const hdr = sched.getRange(1, SCHED_IMPORT_AT_COL).getValues()[0][0];
+  if (String(hdr || "").trim() === "") sched.getRange(1, SCHED_IMPORT_AT_COL).setValues([["Result_Imported_At"]]);
+  const col = sched.getRange(2, SCHED_IMPORT_AT_COL, n, 1).getValues();
+  const now = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd HH:mm");
+  rows.forEach(function (i) { col[i - 1][0] = now; });
+  sched.getRange(2, SCHED_IMPORT_AT_COL, n, 1).setValues(col.map(function (r) {
+    const v = r[0];
+    return [(typeof v === "string" && v !== "") ? "'" + v : v];
+  }));
+  _forgetTab_("Schedule_DB");
 }
 
 function _parseSheetDate_(v) {
@@ -3297,12 +4084,20 @@ function _parseSheetDate_(v) {
   let d = new Date(s);
   return isNaN(d.getTime()) ? null : d;
 }
+// A Date VALUE as the app's display text: 2026/09/11, or 2026/09/11 10:42 when it has a time of
+// day (in Asia/Tokyo). For cells whose number format the app does not own.
+function _dateText_(d) {
+  const t = Utilities.formatDate(d, "Asia/Tokyo", "HH:mm");
+  return Utilities.formatDate(d, "Asia/Tokyo", t === "00:00" ? "yyyy/MM/dd" : "yyyy/MM/dd HH:mm");
+}
 function _formatDateKey_(v) {
   let d = _parseSheetDate_(v);
   if (!d) return String(v || "").trim();
   return d.getFullYear() + "/" + ("0"+(d.getMonth()+1)).slice(-2) + "/" + ("0"+d.getDate()).slice(-2);
 }
 
+// Save one interview-result entry. `entry` is an object keyed by header name.
+// `force` skips the duplicate guard (used after the user confirms).
 function saveInterviewResult(role, perms, entry, force) {
   if (!_hasResultPerm_(role, perms, "entry_interview_results")) throw new Error("権限がありません");
   const sh = _getInterviewResultsSheet_();
@@ -3455,6 +4250,11 @@ function _slotIsPast_(date, period, nowKey) {
 // single payload — it only ever accumulates rows.
 function getAllTeachersSchedule(weekStartDate) {
   _requireSession_("getAllTeachersSchedule");
+  // ⚠️ Every teacher's week, students included: the permission behind the calendar, not just a
+  // session (2026-10-26). Either one, so this is never stricter than a screen that loads it.
+  if (!_hasPerm_("", "", "view_admissions") && !_hasPerm_("", "", "view_teacher_schedule")) {
+    throw new Error("権限がありません");
+  }
   const tabs = _readTabs_(["Teacher_Master", "Schedule_DB"]);
   const tData = tabs["Teacher_Master"] || [];
   const sData = tabs["Schedule_DB"] || [];
@@ -3615,38 +4415,79 @@ function getUploadedFile(role, perms, fileUrl) {
     throw new Error("書類のサイズが大きすぎます（" + Math.round(bytes.length / 1048576) + "MB）。");
   }
 
+  // ⚠️ Only document and image types travel as themselves; anything else is octet-stream
+  // (2026-10-26). Uploads accept any file, and openStoredFile is safe today only because it
+  // DOWNLOADS (a.download). An uploaded .html opened inline would run in the app's own origin,
+  // next to the session token in localStorage. This keeps a later inline viewer from inheriting
+  // that.
+  const type = String(blob.getContentType() || "").toLowerCase();
+  const SAFE = /^(application\/pdf|image\/(png|jpeg|gif|webp|heic|heif)|text\/plain|application\/(msword|vnd\.openxmlformats-officedocument\.[a-z.]+|vnd\.ms-excel|vnd\.ms-powerpoint))$/;
   return {
     base64: Utilities.base64Encode(bytes),
-    mimeType: blob.getContentType() || "application/octet-stream",
+    mimeType: SAFE.test(type) ? type : "application/octet-stream",
     name: file.getName()
   };
 }
 
-// One-off, run from the editor AFTER confirming the new viewer works in
-// production — see the ordering note below. Undoes the historical
-// ANYONE_WITH_LINK sharing on every hearing sheet.
-//
-// Ordering matters: revoking before the new viewer is live makes the documents
-// unreachable, and revoking also closes the rollback window, because reverting
-// the code puts teachers back on raw Drive links to files that are now private.
-function revokeHearingSheetSharing() {
-  _requireMaintenanceUnlock_("revokeHearingSheetSharing");
-  const sSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Schedule_DB");
-  if (!sSheet) return "Schedule_DB not found";
-  const data = sSheet.getDataRange().getDisplayValues();
-  let fixed = 0, failed = 0, seen = {};
+// Drive file ids of building photos — exterior (idx 32), the nine slots (21–26, 29–31) and
+// the three その他 slots (49–51).
+// The allow-list for getStoredFileNames' "photo" kind. Deliberately NOT one of
+// getUploadedFile's lists: that serves BYTES, and photos reach the page only as a PDF.
+function _buildingPhotoFileIds_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_BUILDING);
+  if (!sheet) return {};
+  const data = sheet.getDataRange().getDisplayValues();
+  const cols = [21, 22, 23, 24, 25, 26, 29, 30, 31, 32, 49, 50, 51];
+  let ids = {};
   for (let i = 1; i < data.length; i++) {
-    let url = String(data[i][9] || "").trim();
-    if (!url || seen[url]) continue;
-    seen[url] = true;
-    let m = url.match(/[-\w]{25,}/);
-    if (!m) continue;
-    try {
-      DriveApp.getFileById(m[0]).setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE);
-      fixed++;
-    } catch (e) { failed++; }
+    cols.forEach(function (c) {
+      const v = String(data[i][c] || "").trim();
+      if (v !== "") ids[v] = true;
+    });
   }
-  return "共有を解除: " + fixed + "件 / 失敗: " + failed + "件";
+  return ids;
+}
+
+// What the file box shows for a stored file: the name the user uploaded, with the prefix
+// the upload added taken off. "" means "stored, but no name worth showing".
+//   hearing  <teacherId>_<yyyy-MM-dd>_<original>   (saveScheduleBatch)
+//   photo    <bldgId>_<slot>_<original>            (_uploadBuildingPhoto_, since 2026-09-29)
+//            <bldgId>_<slot>.jpg                   (before: the uploaded name was discarded)
+// ⚠️ The KIND picks the pattern, never the name's shape: a photo called
+// 2026-04-01_scan.jpg would otherwise lose its date to the hearing-sheet rule.
+function _storedFileLabel_(name, kind) {
+  const s = String(name == null ? "" : name);
+  const m = kind === "hearing" ? s.match(/^.*?_\d{4}-\d{2}-\d{2}_(.+)$/)
+          : s.match(/^.*?_(?:Exterior|WM_\d|Garbage_\d|Bicycle_\d|Misc_\d)_(.+)$/);
+  if (m) return m[1];
+  return kind === "photo" ? "" : s;
+}
+
+const STORED_NAME_MAX = 12;   // the building editor holds 10; more is not a file box asking
+
+// The NAMES of stored files, for the file box's 「✓ 登録済み: name」. Names only, never bytes.
+// ⚠️ Same guard as getUploadedFile, and the same membership rule for the same reason: this
+// reads Drive as the deployer, so an id must be attached to a record of the kind asked for,
+// or any caller could learn the name of any file the deployer owns. The kind only chooses
+// WHICH allow-list is read (one sheet read, not both) — a wrong kind finds nothing.
+// Unknown or unreadable ids are left out silently: a missing name degrades to 「✓ 登録済み」.
+function getStoredFileNames(role, perms, kind, refs) {
+  if (!_permOrLegacyRole_(role, perms, "view_dorms", ["sales", "teacher"]) &&
+      !_hasPerm_(role, perms, "view_interview_results")) {
+    throw new Error("権限がありません");
+  }
+  if (kind !== "hearing" && kind !== "photo") return {};
+  const list = (Array.isArray(refs) ? refs : []).slice(0, STORED_NAME_MAX);
+  if (!list.length) return {};
+  const allowed = kind === "hearing" ? _hearingSheetFileIds_() : _buildingPhotoFileIds_();
+  let out = {};
+  list.forEach(function (ref) {
+    const m = String(ref || "").match(/[-\w]{25,}/);
+    if (!m || !allowed[m[0]]) return;
+    try { out[String(ref)] = _storedFileLabel_(DriveApp.getFileById(m[0]).getName(), kind); }
+    catch (e) { /* deleted or unreadable: no name */ }
+  });
+  return out;
 }
 
 // One slot's identity. TRIMMED on both sides: the calendar compares these as exact
@@ -3728,8 +4569,8 @@ function _saveScheduleBatchLocked_(updatesArray, actorName, actorRole, notify) {
     if (!_uploadFolder) _uploadFolder = DriveApp.getFolderById(_requireConfig_(CONFIG_UPLOADS_FOLDER));
     return _uploadFolder;
   };
-  let skipped = [];
-  
+  let skipped = [], deniedSkipped = [];
+
   // ⚠️ FIRST ROW WINS. This was last-row-wins, while the calendar (slots.find) and
   // _findScheduleRow_ both take the first. With two rows for one slot the screen showed
   // the booked first row and the server judged wasBookedBefore from an empty later one,
@@ -3807,19 +4648,14 @@ function _saveScheduleBatchLocked_(updatesArray, actorName, actorRole, notify) {
       return;
     }
 
-    // OWNERSHIP ENFORCEMENT: a 'sales' actor may only modify an existing booking
-    // (already Booked or Cancel_Request) when they are its 担当 (In Charge).
-    // Admins and teachers are exempt (teachers only ever act on their own column,
-    // which is enforced in the UI). Open/Available slots have no owner, so booking
-    // them is always allowed. Reassignment-driven writes are also exempt.
-    if (actorRole === "sales" && (wasBookedBefore || wasCancelReqBefore)
-        && u.status !== "Reassign_Pending") {
-      let owner = _normName_(oldInCharge);
-      if (owner !== "" && owner !== _normName_(actorName)) {
-        skipped.push(key);
-        return; // skip this update — not the owner
-      }
-    }
+    // OWNERSHIP AND PERMISSION, from the SESSION (_scheduleDenyReason_). This used to compare the
+    // role and name the BROWSER sent, so any role string but 営業's skipped it; those two
+    // arguments are no longer read for any decision. SKIPPED like a past slot, never
+    // thrown, and BEFORE the document upload, so a refused update stores no file either.
+    const deny = _scheduleDenyReason_(rowMap[key] ? data[rowMap[key] - 1] : null, u.teacherId,
+                                      String(u.status || ""));
+    if (deny === "owner") { skipped.push(key); return; }
+    if (deny !== "") { deniedSkipped.push(key); return; }
 
     // Queued, and sent by saveScheduleBatch once every row is written and the lock is
     // released. Captured values only — `let` in this callback is per-update.
@@ -3890,6 +4726,9 @@ function _saveScheduleBatchLocked_(updatesArray, actorName, actorRole, notify) {
   }
   if (skipped.length > 0) {
     msgs.push("一部の予約は担当者ではないため変更できませんでした（" + skipped.length + "件）。自分が担当の予約のみ変更できます。");
+  }
+  if (deniedSkipped.length > 0) {
+    msgs.push("権限のない枠は保存されませんでした（" + deniedSkipped.length + "件）。");
   }
   return msgs.length ? msgs.join("\n") : "Success";
 }
@@ -3995,6 +4834,10 @@ function requestReassignment(fromTeacherId, date, period, toTeacherId, newDate, 
 
   const found = _findScheduleRow_(sSheet, fromTeacherId, date, period);
   if (!found) throw new Error("対象の予約が見つかりません。");
+  // The slot's teacher, its 担当 or an admin: who the screen shows the button to.
+  if (_scheduleDenyReason_(found.row, fromTeacherId, null) !== "") {
+    throw new Error("この予約を変更する権限がありません。");
+  }
 
   const row = found.row;
   if (row[5] !== "Booked") throw new Error("予約済みの面接のみ再依頼できます。");
@@ -4052,23 +4895,86 @@ function requestReassignment(fromTeacherId, date, period, toTeacherId, newDate, 
 }
 
 // Target teacher accepts — booking moves to them (at the proposed new time if any)
+// ⚠️ WHO answers a 交代 comes from the SESSION, never from the argument. accept/decline took
+// `toTeacherId` from the browser with only "some session exists" as the guard, so any signed-in
+// account could accept or decline a request addressed to another teacher (the toggleNotification
+// shape, found 2026-09-28). The client only ever sends currentUser.id, so for real use nothing
+// changes. The ROLE matters as much as the id: staff and teacher ids share no namespace (see
+// _sessionAccountKey_), so staff 5 must not answer teacher 5's request — only a literal teacher
+// session is a 交代 recipient. tests/reqcollision.test.js runs both functions for real.
+function _reassignResponderId_(me) {
+  if (!me || String(me.role || "") !== "teacher") {
+    throw new Error("この交代依頼に対応できるのは依頼先の先生のみです。");
+  }
+  return String(me.id || "");
+}
+
+// ---- Who may change a 面接スケジュール slot -----------------------------------------
+// ⚠️ saveScheduleBatch, requestReassignment and requestBookerDateChange asked only
+// _requireSession_ until 2026-10-26, so any signed-in account could book, cancel or overwrite
+// any teacher's slots. The one ownership check there read the browser's own actorRole/actorName,
+// so sending any role but "sales" skipped it. These mirror the SCREEN (decided 2026-10-26: nobody
+// loses an action the UI offers), and read only the session:
+//   - a 教務 acts on their OWN column only (calRenderGrid makes nothing else clickable for them);
+//   - anyone else needs view_admissions, books an Available slot, and changes a live booking only
+//     as its 担当 (calHandleClick's isOwner; a blank 担当 owns nothing, as on the screen);
+//   - admin level passes, as isAdminRole() does on the client.
+// ⚠️ A 教務 is literally role "teacher": staff and teacher ids share no namespace
+// (_sessionAccountKey_), so staff 5 is not teacher 5.
+const SCHED_LIVE_STATUSES = ["Booked", "Cancel_Request", "Reassign_Pending"];
+
+function _scheduleOwnSlot_(teacherId) {
+  return !!_authUser && String(_authUser.role || "") === "teacher" &&
+         String(_authUser.id || "").trim() !== "" &&
+         String(_authUser.id || "").trim() === String(teacherId == null ? "" : teacherId).trim();
+}
+
+// "" = allowed; "perm" = not this caller's kind of change; "owner" = a live booking they are not
+// the 担当 of. `newStatus` is null for the request endpoints, which act on a booking only.
+function _scheduleDenyReason_(row, teacherId, newStatus) {
+  if (_isAdminLevel_("")) return "";
+  if (!_authUser) return "perm";
+  if (String(_authUser.role || "") === "teacher") return _scheduleOwnSlot_(teacherId) ? "" : "perm";
+  if (!_hasPerm_("", "", "view_admissions")) return "perm";
+  const r = row || [];
+  const status = String(r[5] || "").trim();
+  const live = SCHED_LIVE_STATUSES.indexOf(status) !== -1 || String(r[6] || "").trim() !== "";
+  if (live) {
+    // ⚠️ Through _normName_: 担当 is a name string (the recurring bug class).
+    const owner = _normName_(r[11]);
+    return (owner !== "" && owner === _normName_(_authUser.name)) ? "" : "owner";
+  }
+  if (newStatus === null) return "perm";   // a request needs a booking to act on
+  if (status !== "Available") return "perm"; // 〇 is the teacher's to open
+  return (newStatus === "Booked" || newStatus === "Available") ? "" : "perm";
+}
+
+// The pending 交代 row addressed to `toTeacherId`, matched on the ORIGINAL slot — the one lookup
+// accept and decline share. It was written out twice; a fix to the match (trimming the period, say)
+// then only reached one of the two paths. Returns { rowIndex (1-based sheet row), row } or null.
+function _findPendingReassign_(data, toTeacherId, date, period) {
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][5] === "Reassign_Pending" &&
+        String(data[i][12]).trim() === String(toTeacherId).trim() &&
+        data[i][3] === date && data[i][4] === period) {
+      return { rowIndex: i + 1, row: data[i] };
+    }
+  }
+  return null;
+}
+
 function acceptReassignment(toTeacherId, date, period) {
-  _requireSession_("acceptReassignment");
+  const me = _requireSession_("acceptReassignment");
+  toTeacherId = _reassignResponderId_(me);
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sSheet = ss.getSheetByName("Schedule_DB");
   if (!sSheet) throw new Error("面接スケジュールのデータが見つかりません。（SYS-01）");
 
   // Find the pending row that targets this teacher (matched on the ORIGINAL slot)
   const data = sSheet.getDataRange().getDisplayValues();
-  let originRowIndex = -1, originRow = null;
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][5] === "Reassign_Pending" &&
-        String(data[i][12]).trim() === String(toTeacherId).trim() &&
-        data[i][3] === date && data[i][4] === period) {
-      originRowIndex = i + 1; originRow = data[i]; break;
-    }
-  }
-  if (originRowIndex === -1) throw new Error("交代依頼が見つかりません。");
+  const hit = _findPendingReassign_(data, toTeacherId, date, period);
+  if (!hit) throw new Error("交代依頼が見つかりません。");
+  const originRowIndex = hit.rowIndex, originRow = hit.row;
 
   const toInfo = _teacherInfo_(toTeacherId);
   const student = originRow[6] || "";
@@ -4121,21 +5027,16 @@ function acceptReassignment(toTeacherId, date, period) {
 
 // Target teacher declines — booking reverts to original teacher
 function declineReassignment(toTeacherId, date, period) {
-  _requireSession_("declineReassignment");
+  const me = _requireSession_("declineReassignment");
+  toTeacherId = _reassignResponderId_(me);
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sSheet = ss.getSheetByName("Schedule_DB");
   if (!sSheet) throw new Error("面接スケジュールのデータが見つかりません。（SYS-01）");
 
   const data = sSheet.getDataRange().getDisplayValues();
-  let originRowIndex = -1, originRow = null;
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][5] === "Reassign_Pending" &&
-        String(data[i][12]).trim() === String(toTeacherId).trim() &&
-        data[i][3] === date && data[i][4] === period) {
-      originRowIndex = i + 1; originRow = data[i]; break;
-    }
-  }
-  if (originRowIndex === -1) throw new Error("交代依頼が見つかりません。");
+  const hit = _findPendingReassign_(data, toTeacherId, date, period);
+  if (!hit) throw new Error("交代依頼が見つかりません。");
+  const originRowIndex = hit.rowIndex, originRow = hit.row;
 
   const fromTeacherId = originRow[1];
   const student = originRow[6] || "";
@@ -4221,6 +5122,9 @@ function requestBookerDateChange(teacherId, date, period, newDate, newPeriod, re
   if (!newDate || !newPeriod) throw new Error("新しい日付と時間を選択してください。");
   const found = _findScheduleRow_(sSheet, teacherId, date, period);
   if (!found) throw new Error("対象の予約が見つかりません。");
+  if (_scheduleDenyReason_(found.row, teacherId, null) !== "") {
+    throw new Error("この予約を変更する権限がありません。");
+  }
   const row = found.row;
   // Was a Cancel_Request-only test, which left 交代 open.
   _requireNoActiveRequest_(row);
@@ -4389,9 +5293,14 @@ function deleteAnnouncement(role, perms, rowIndex, actorName, actorId, expectedI
   return { deleted: true };
 }
 
+// ⚠️ WHOSE feed comes from the SESSION, never the argument (2026-10-26): any signed-in account
+// could read any teacher's 交代 requests by passing their id. The argument is ignored and kept
+// only so the signature (and its two callers) stay as they are. Only a literal teacher session
+// has this feed; staff and teacher ids share no namespace (_sessionAccountKey_).
 function getTeacherNotifications(teacherId) {
   _requireSession_("getTeacherNotifications");
-  const me = String(teacherId || "").trim();
+  if (!_authUser || String(_authUser.role || "") !== "teacher") return [];
+  const me = String(_authUser.id || "").trim();
   if (me === "") return [];
   const data = _readTabs_(["Schedule_DB"])["Schedule_DB"] || [];
   let out = [];
@@ -4418,10 +5327,13 @@ function getTeacherNotifications(teacherId) {
 // pending cancellation requests, restricted to bookings where this user is the
 // 担当 (In Charge). Each item carries the slot's teacherId/date/period so the
 // frontend can jump straight to that slot in the all-teachers calendar.
+// ⚠️ The 担当 name comes from the SESSION (2026-10-26): passing a colleague's name read their
+// 日時変更 / キャンセル requests, students included. staffName is ignored, kept for the signature.
 function getPendingNotifications(staffName) {
   _requireSession_("getPendingNotifications");
   const data = _readTabs_(["Schedule_DB"])["Schedule_DB"] || [];
-  const me = _normName_(staffName);
+  const me = _normName_(_authUser ? _authUser.name : "");
+  if (me === "") return [];
   let out = [];
   for (let i = 1; i < data.length; i++) {
     let inCharge = _normName_(data[i][11]);
@@ -4472,13 +5384,31 @@ function getPendingNotifications(staffName) {
 // the page appears immediately and this fills in.
 const HOME_UPCOMING_DAYS = 7;
 
+// Is this Schedule_DB row a live interview, and in what state?
+//   ""          a plain booking
+//   "reassign"  a 交代 was requested; it still happens with THIS teacher unless accepted
+//   "cancelreq" a キャンセル was requested; it still happens until an admin approves
+//   null        not an interview at all (Available, cleared, or a request on an empty slot)
+// ⚠️ One home for the rule. The bell shows the REQUEST; ホーム shows the INTERVIEW, and the two
+// disagreeing is what hid a booking that everyone could see in 面接スケジュール.
+// ⚠️ The student is what makes the pending states count: Reassign_Pending on a row with no
+// student is an empty slot being offered, not somebody's interview.
+function _scheduleLiveState_(status, student) {
+  const s = String(status == null ? "" : status).trim();
+  const who = String(student == null ? "" : student).trim();
+  if (s === "Booked") return "";
+  if (who === "") return null;
+  if (s === "Reassign_Pending") return "reassign";
+  if (s === "Cancel_Request") return "cancelreq";
+  return null;
+}
+
 function getUpcomingForUser(role, perms, userId, userName) {
-  // Identity comes from the SESSION. role/userId/userName are still in the
-  // signature for consistency with every other endpoint, and are used only as
-  // the observe-mode fallback — _requireSession_ returns null when AUTH_ENFORCE
-  // is off and throws when it is on.
-  const sess = _requireSession_("getUpcomingForUser");
-  const me = sess || { role: role, id: userId, name: userName };
+  // Identity comes from the SESSION, only. role/userId/userName are still in the
+  // signature for consistency with every other endpoint, and are ignored. There
+  // used to be a browser-supplied fallback here for observe mode; _requireSession_
+  // now returns a session or throws, so a fallback could only ever trust the client.
+  const me = _requireSession_("getUpcomingForUser");
   const myRole = String(me.role || "");
 
   // Admins and master see requests only, by decision — an all-interviews list
@@ -4505,13 +5435,20 @@ function getUpcomingForUser(role, perms, userId, userName) {
   let out = [];
 
   for (let i = 1; i < data.length; i++) {
-    if (String(data[i][5]).trim() !== "Booked") continue;
+    // ⚠️ NOT `=== "Booked"`. A booking with a request on it keeps its student and still
+    // happens: 交代 leaves Status at Reassign_Pending until the other teacher accepts, and
+    // キャンセル依頼 at Cancel_Request until an admin approves. Both used to vanish from ホーム
+    // while the bell showed the request — reported 2026-09-16 as "booked but not showing".
+    const state = _scheduleLiveState_(data[i][5], data[i][6]);
+    if (state === null) continue;
     const date = String(data[i][3] || "").trim();
     if (date < today || date > cutoff) continue;
 
     // A teacher's own slots are keyed by ID; a 営業's bookings by the 担当 name.
     // ⚠️ 担当 matching is by name, so a value that matches no staff member
-    // reaches nobody — diagnoseInChargeMatching reports exactly that.
+    // reaches nobody. A booking's 担当 is its booker's account name, so that happens only to
+    // bookings made before someone was renamed in ユーザー管理 (担当名チェック, which listed
+    // them, was removed 2026-10-26).
     const mine = (myRole === "teacher")
       ? String(data[i][1] || "").trim() === meId
       : _normName_(data[i][11]) === meName && meName !== "";
@@ -4525,7 +5462,9 @@ function getUpcomingForUser(role, perms, userId, userName) {
       nationality: String(data[i][7] || ""),
       course: String(data[i][10] || ""),
       teacherName: String(data[i][2] || ""),
-      link: String(data[i][8] || "")
+      link: String(data[i][8] || ""),
+      // "" for a plain booking, so an ordinary row reads exactly as before.
+      state: state
     });
   }
 
@@ -4534,6 +5473,97 @@ function getUpcomingForUser(role, perms, userId, userName) {
     return String(a.period).localeCompare(String(b.period), "ja");
   });
   return out;
+}
+
+// Editor-run, READ-ONLY: why is a booking missing from someone's ホーム?
+//
+// ⚠️ getUpcomingForUser applies five tests and EVERY ONE of them fails silently — an empty
+// 今後7日間の面接 looks identical whether the account lacks view_admissions, the 担当 name does
+// not match, the date is outside the window, or the status carried a request. Reported
+// 2026-09-16 by a 営業 whose interview was booked for that same day. This names the test that
+// rejected each row, for one person and one week, instead of guessing between them.
+//
+// `who` is a name or an ID, in either staff sheet.
+function diagnoseHomeUpcoming(who) {
+  _requireMaintenanceUnlock_("diagnoseHomeUpcoming");
+  const want = _normName_(who);
+  if (want === "") return 'usage: diagnoseHomeUpcoming("name or ID")';
+
+  const tabs = _readTabs_(["Staff_Master", "Teacher_Master", "Schedule_DB"]);
+  // Resolved the way the login path resolves it: _userFromRow_, never a second mapping.
+  let found = null;
+  [["Staff_Master", ""], ["Teacher_Master", "teacher"]].forEach(function (pair) {
+    if (found) return;
+    const rows = tabs[pair[0]] || [];
+    for (let i = 1; i < rows.length; i++) {
+      if (_normName_(rows[i][0]) !== want && _normName_(rows[i][1]) !== want) continue;
+      const role = pair[1] || _staffRoleFromRow_(rows[i]);
+      found = { sheet: pair[0], user: _userFromRow_(rows[i], role) };
+      break;
+    }
+  });
+  if (!found) return String(who) + ": no such person in Staff_Master or Teacher_Master.";
+
+  const u = found.user;
+  // The same string the session would carry for this person, so this cannot drift from the
+  // test getUpcomingForUser makes (_effectivePerms_ returns exactly this on their session).
+  const holdsAdmissions = String(u.permissions) === "ALL" ||
+                          String(u.permissions).split(",").indexOf("view_admissions") !== -1;
+  const out = [];
+  out.push(found.sheet + ": " + u.name + " (id " + u.id + "), role=" + u.role +
+           ", isAdmin=" + u.isAdmin + ", view_admissions=" + holdsAdmissions);
+
+  if (_isAdminRole_(u.role) || u.role === "master") {
+    out.push("→ TEST 1: admin/master get requests only, by decision. ホーム shows NO interview list.");
+  } else if (u.role !== "teacher" && !holdsAdmissions) {
+    out.push("→ TEST 2: no view_admissions, so getUpcomingForUser returns [] for this account.");
+  }
+
+  const today = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd");
+  const end = new Date();
+  end.setDate(end.getDate() + HOME_UPCOMING_DAYS);
+  const cutoff = Utilities.formatDate(end, "Asia/Tokyo", "yyyy-MM-dd");
+  out.push("window " + today + " … " + cutoff + " (HOME_UPCOMING_DAYS=" + HOME_UPCOMING_DAYS + ")");
+
+  const meName = _normName_(u.name);
+  const meId = String(u.id || "").trim();
+  const sched = tabs["Schedule_DB"] || [];
+  let shown = 0, charge = {};
+  for (let i = 1; i < sched.length; i++) {
+    const date = String(sched[i][3] || "").trim();
+    if (date < today || date > cutoff) continue;   // out of window: not this person's problem
+    const status = String(sched[i][5] || "").trim();
+    const student = String(sched[i][6] || "").trim();
+    const inCharge = String(sched[i][11] || "").trim();
+    if (inCharge !== "") charge[inCharge] = (charge[inCharge] || 0) + 1;
+
+    const where = "行" + (i + 1) + " " + date + " " + String(sched[i][4] || "") +
+                  " / 担当=" + JSON.stringify(inCharge) + " / TeacherID=" + JSON.stringify(String(sched[i][1] || "")) +
+                  " / " + JSON.stringify(status) + " / " + JSON.stringify(student);
+    const state = _scheduleLiveState_(status, student);
+    if (state === null) { out.push("  skip  " + where + "  ← TEST 4: not a live booking"); continue; }
+    const mine = (u.role === "teacher")
+      ? String(sched[i][1] || "").trim() === meId
+      : _normName_(inCharge) === meName && meName !== "";
+    if (!mine) {
+      out.push("  skip  " + where + "  ← TEST 5: " +
+               (u.role === "teacher" ? "another teacher's slot" : "担当 is not this person"));
+      continue;
+    }
+    shown++;
+    out.push("  SHOW  " + where + (state ? "  (" + state + ")" : ""));
+  }
+  out.push("→ " + shown + " row(s) would appear on ホーム.");
+
+  // Every 担当 spelling in the window, so a mis-typed name is visible beside the right one.
+  const names = Object.keys(charge).sort();
+  out.push("担当 values in this window: " + (names.length
+    ? names.map(function (n) { return n + "×" + charge[n]; }).join(" / ")
+    : "(none)") + "   [this person: " + JSON.stringify(u.name) + "]");
+
+  const report = out.join("\n");
+  console.log(report);
+  return report;
 }
 
 // Both 承認 and 予約を取り消す act on a Schedule_DB row index that was handed to the
@@ -4599,7 +5629,7 @@ function approveBookerDateChange(staffName, rowIndex, student, date, period) {
 // 予約を取り消す: the request is not merely declined — the interview itself is
 // cancelled and the slot goes back to 空き.
 //
-// Distinct from rejectBookerDateChange, which only clears the request and leaves the
+// Distinct from _rejectBookerDateChange_, which only clears the request and leaves the
 // booking standing at its original time.
 //
 // ⚠️ Clearing cols 17-21 is NOT optional. Col 20 (idx 19) is the Pending flag
@@ -4649,7 +5679,7 @@ function cancelBookingFromDateChange(staffName, rowIndex, student, date, period)
 // has 承認/却下 in the bell). Without this check any caller could withdraw anybody's
 // request.
 //
-// ⚠️ No teacher notification, unlike rejectBookerDateChange: there the 担当 decided
+// ⚠️ No teacher notification, unlike _rejectBookerDateChange_: there the 担当 decided
 // and the teacher needs telling. Here the teacher IS the actor.
 function withdrawActiveRequest(teacherId, date, period, actorName, actorId) {
   const me = _requireSession_("withdrawActiveRequest");
@@ -4702,11 +5732,13 @@ function withdrawActiveRequest(teacherId, date, period, actorName, actorId) {
 
 // 却下: decline the move and leave the booking standing at its original time.
 //
-// ⚠️ No UI reaches this any more — the bell offers 承認 / 予約を取り消す. It is kept
-// deliberately (declining without destroying the interview is a reasonable third
-// action) and stays registered, so it keeps the same session-bound guard as the two
-// live actions rather than trusting the staffName argument it is handed.
-function rejectBookerDateChange(staffName, rowIndex, student, date, period) {
+// ⚠️ No UI reaches this — the bell offers 承認 / 予約を取り消す. The code is kept
+// (declining without destroying the interview is a reasonable third action), but it
+// is PRIVATE since 2026-09-29: an unused endpoint is attack surface, and only a name
+// ending in _ keeps a function off google.script.run — dropping the registry line
+// alone would not have. To give it a button: rename it back AND re-register it. It
+// keeps the same session-bound guard as the two live actions either way.
+function _rejectBookerDateChange_(staffName, rowIndex, student, date, period) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sSheet = ss.getSheetByName("Schedule_DB");
   if (!sSheet) throw new Error("面接スケジュールのデータが見つかりません。（SYS-01）");
@@ -4853,11 +5885,11 @@ function _sendAdminCancelEmail_(teacherName, date, period, studentName, reason, 
 // ⚠️ WHOSE row comes from the SESSION, never from the arguments. It took userId and userRole
 // from the browser with only "some session exists" as the guard, so any signed-in user could
 // switch any colleague's email notifications. Both callers (アカウント設定, the calendar's
-// toggleNotif) only ever mean "my own", so the signature stays and the arguments are ignored
-// whenever a session resolved; observe mode with no session still reads them, as every guard does.
+// toggleNotif) only ever mean "my own", so the signature stays and the arguments are ignored.
+// With no session _requireSession_ throws, so nothing is written for anyone.
 function toggleNotification(userId, userRole, turnOn) {
   const me = _requireSession_("toggleNotification");
-  if (me) { userId = me.id; userRole = me.role; }
+  userId = me.id; userRole = me.role;
   if (_isMasterRole_(userRole)) throw new Error("マスターアカウントにはメール通知の設定がありません。");
   const sheetName = userRole === "teacher" ? "Teacher_Master" : "Staff_Master";
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
@@ -4872,6 +5904,39 @@ function toggleNotification(userId, userRole, turnOn) {
 }
 
 // --- 2. AUTOMATED STUDENT DATA SYNC ---
+// The source tabs mirrored into Past_DB. ⚠️ ONE list: diagnoseDestinationSource carried its own
+// copy and silently missed 修了2026.4~ once the import gained it. Add a tab here, nowhere else.
+function _pastSourceTabs_() {
+  return ["修了2024.3まで", "修了2024.4~2025.3", "修了2025.4~2026.3", "修了2026.4~"];
+}
+
+// Columns the generic header loop must NOT match: its "contains" test would take a neighbour.
+const PAST_STRICT_COLS = ["卒業年月日", "備考"];
+
+// A 修了 tab's column for 卒業年月日 / 備考, by HEADER NAME — the tabs do not all name them alike,
+// so the letter (AO / AP) is never assumed. -1 when absent.
+//   卒業年月日: the exact name first; otherwise the first header holding 卒業 or 修了 AND 日 but
+//     NOT 予定. ⚠️ 卒業予定 is in the same tab, and "contains 卒業" would take it — the
+//     進路希望 trap the 決定進路 matcher below documents.
+//   備考: the exact name first; otherwise a header that STARTS with 備考. Never a loose
+//     "contains", which a 寮備考-style column to the left would win.
+function _pastColumnIndex_(colName, headerRow) {
+  const norm = function (v) {
+    return String(v == null ? "" : v).replace(/[０-９]/g, function (s) { return String.fromCharCode(s.charCodeAt(0) - 0xFEE0); })
+      .replace(/[\s\u3000]/g, "");
+  };
+  const hs = (headerRow || []).map(norm);
+  const exact = hs.indexOf(colName);
+  if (exact !== -1) return exact;
+  for (let c = 0; c < hs.length; c++) {
+    const h = hs[c];
+    if (h === "") continue;
+    if (colName === "卒業年月日" && (h.indexOf("卒業") !== -1 || h.indexOf("修了") !== -1) && h.indexOf("日") !== -1 && h.indexOf("予定") === -1) return c;
+    if (colName === "備考" && h.indexOf("備考") === 0) return c;
+  }
+  return -1;
+}
+
 function fetchAndMergeStudentData(userRole, perms) {
   _bustStudentCache_();   // fresh import must not be masked by a stale cache entry
   if (!_permOrLegacyRole_(userRole, perms, "view_students", ["sales"])) throw new Error("権限がありません");
@@ -4918,21 +5983,19 @@ function fetchAndMergeStudentData(userRole, perms) {
         // (修了2024.3まで, 修了2024.4~2025.3, …) already ARE the graduation
         // cohorts, so this avoids parsing 卒業予定, which is 1381/1400 blank and
         // comes back as "############" through the bulk reader anyway.
-        "修了期"
+        "修了期",
+        // 2026-10-06: the departure date 増減推移 counts 出 from, and the tab's free 備考
+        // (stored only — nothing reads it yet). Both found by _pastColumnIndex_, not the loose
+        // loop below: 卒業予定 sits in the same tab, and "contains 卒業" would take it.
+        "卒業年月日", "備考"
       ],
       records: {}
     }
   };
 
   const syncConfigs = [
-    { sourceId: sourceId, sourceTab: "在籍", targetGroup: "central" },
-    { sourceId: sourceId, sourceTab: "修了2024.3まで", targetGroup: "past" },
-    { sourceId: sourceId, sourceTab: "修了2024.4~2025.3", targetGroup: "past" },
-    { sourceId: sourceId, sourceTab: "修了2025.4~2026.3", targetGroup: "past" },
-    { sourceId: sourceId, sourceTab: "修了2026.4~",       targetGroup: "past" }
-    // Add more here! Example:
-    // { sourceId: sourceId, sourceTab: "退学者", targetGroup: "past" }
-  ];
+    { sourceId: sourceId, sourceTab: "在籍", targetGroup: "central" }
+  ].concat(_pastSourceTabs_().map(function (t) { return { sourceId: sourceId, sourceTab: t, targetGroup: "past" }; }));
   
   let syncErrors = [];
 
@@ -4967,6 +6030,7 @@ function fetchAndMergeStudentData(userRole, perms) {
       const headerRow = rawData[headerRowIndex];
       
       const columnMap = targetGroup.cols.map(colName => {
+        if (PAST_STRICT_COLS.indexOf(colName) !== -1) return _pastColumnIndex_(colName, headerRow);
         let target = String(colName).replace(/[１-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[\s　]/g, ''); 
         
         for (let c = 0; c < headerRow.length; c++) {
@@ -5061,6 +6125,12 @@ function fetchAndMergeStudentData(userRole, perms) {
       tg.sheet.getRange(1, 1, finalData.length, finalData[0].length).setValues(finalData);
     }
   }
+
+  // The rows were just rewritten into cells whose old formats clearContents kept, so re-pin the
+  // date columns — this is what stops 学生一覧 mixing 9/11/2026 and 2026/09/11. A failure here
+  // must not fail the import: the data is already written, only its display is at stake.
+  try { _applyDateFormats_(["Central_DB", "Past_DB"]); }
+  catch (e) { console.error("日付の表示形式を設定できませんでした: " + ((e && e.message) || e)); }
 
   if (syncErrors.length > 0) console.error("同期エラー: " + syncErrors.join(" | "));
 
@@ -5462,7 +6532,7 @@ function _getRecruitCapSheet_() {
 //   edit_recruitment    — numbers, countries, 留学ビザ以外, キャンセル
 //   manage_recruitment  — intakes, 定員, 地域設定, 募集担当者 (+ everything above)
 // Higher levels imply the lower ones, so only one box needs ticking.
-// See the note on _hasPerm_: role/perms are ignored when enforcing.
+// See the note on _hasPerm_: role/perms are ignored; the session decides.
 function _hasRecruitPerm_(role, perms, needed) {
   // ⚠️ REVERSED DECISION, 2026-09-07. This used to say "master only — ordinary admins
   // are governed by their own 募集状況 permissions, so 入力 can be granted without 管理".
@@ -6270,48 +7340,6 @@ function _getOtherVisaSheet_() {
   return sh;
 }
 
-// ---- One-time migration: add ビザ変更 to Recruitment_OtherVisa ----
-// Run once from the Apps Script editor AFTER deploying, on each spreadsheet
-// (staging and production have separate copies).
-//
-// Idempotent: it keys off the header, so running it twice does nothing. It
-// snapshots first, and uses insertColumnAfter so Sheets shifts 課程/担当/松野/学費
-// right WITH their data rather than us moving values by hand.
-//
-// ⚠️ The code above already expects the new layout, so 課程 onwards will read one
-// column to the left until this has run. Deploy and migrate together.
-function migrateOtherVisaAddDesiredColumn() {
-  _requireMaintenanceUnlock_("migrateOtherVisaAddDesiredColumn");
-  const sh = _getOtherVisaSheet_();
-  const lastCol = Math.max(sh.getLastColumn(), 1);
-  const headers = sh.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
-
-  // Final state — nothing to do.
-  if (headers.indexOf("ビザ変更") !== -1) {
-    return "already migrated — " + sh.getLastColumn() + " columns, nothing to do";
-  }
-
-  // The column was named 変更希望ビザ when this migration first shipped. A sheet
-  // that already ran it needs a RENAME, not another insert — without this branch
-  // the check above would miss and we would add a second column.
-  const renamed = headers.indexOf("変更希望ビザ");
-  if (renamed !== -1) {
-    sh.getRange(1, renamed + 1).setValue("ビザ変更");
-    SpreadsheetApp.flush();
-    return "renamed 変更希望ビザ -> ビザ変更 (column " + (renamed + 1) + ")";
-  }
-
-  // Fresh sheet: insert the column. insertColumnAfter shifts 課程/担当/松野/学費
-  // right WITH their data, so no values are moved by hand.
-  _snapshotSheet_(SHEET_RECRUIT_VISA);
-  sh.insertColumnAfter(5);
-  sh.getRange(1, 5).setValue("現在のビザ");
-  sh.getRange(1, 6).setValue("ビザ変更");
-  SpreadsheetApp.flush();
-  const after = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0];
-  return "migrated. headers now: " + after.join(" | ");
-}
-
 function _getOtherVisaRows_(intake, pre) {
   const data = pre || _getOtherVisaSheet_().getDataRange().getDisplayValues();
   const want = String(intake == null ? "" : intake).trim();
@@ -6861,8 +7889,8 @@ function diagnoseDestinationSource() {
   out.push("=== source: " + ss.getName() + " ===");
   out.push("  all tabs: " + ss.getSheets().map(function (s) { return s.getName(); }).join(" | "));
 
-  // Exactly the tabs fetchAndMergeStudentData pulls into Past_DB.
-  ["修了2024.3まで", "修了2024.4~2025.3", "修了2025.4~2026.3"].forEach(function (tabName) {
+  // Exactly the tabs fetchAndMergeStudentData pulls into Past_DB (one list, _pastSourceTabs_).
+  _pastSourceTabs_().forEach(function (tabName) {
     let sh = null;
     ss.getSheets().forEach(function (s) {
       if (s.getName().replace(/[\s　]/g, '') === tabName.replace(/[\s　]/g, '')) sh = s;
@@ -6885,6 +7913,16 @@ function diagnoseDestinationSource() {
     }
     out.push("  学籍番号 header row: " + (headerRowIndex === -1 ? "NOT FOUND" : "index " + headerRowIndex));
     if (headerRowIndex === -1) return;
+
+    // 卒業年月日 / 備考 (2026-10-06): found by header NAME, which differs between tabs. Shows the
+    // header the import picks and what sits at AO [40] / AP [41], with ⚠️ when they differ.
+    const hr = raw[headerRowIndex];
+    [["卒業年月日", 40], ["備考", 41]].forEach(function (p) {
+      const at = _pastColumnIndex_(p[0], hr);
+      out.push("  " + p[0] + " → " + (at === -1 ? "NOT FOUND" : "[" + at + "] " + JSON.stringify(String(hr[at]).trim())) +
+               "   (column " + (p[1] === 40 ? "AO" : "AP") + " [" + p[1] + "] = " + JSON.stringify(String(hr[p[1]] == null ? "" : hr[p[1]]).trim()) + ")" +
+               (at !== p[1] ? "   ⚠️ not " + (p[1] === 40 ? "AO" : "AP") : ""));
+    });
 
     // Every non-empty header cell, so a header on the wrong row is visible.
     out.push("  --- header row " + headerRowIndex + " ---");
@@ -7495,6 +8533,9 @@ function getDestinationDetail(role, perms, cohort, category) {
       cohort: co,                                // the 集計表 modal cross-tabs on this
       nationality: at(r, natIdx),
       name: at(r, nameIdx) || at(r, nickIdx),
+      // ⚠️ Carried even though no column shows it: 修了生検索 filters these rows in the browser,
+      // and without it a student findable by nickname on the sheet is unfindable in the app.
+      nick: at(r, nickIdx),
       course: _recCourseKey_(at(r, courseIdx)),   // strips the 期 prefix, as elsewhere
       destination: raw,
       prefecture: at(r, kenIdx),
@@ -8098,6 +9139,23 @@ function authoriseServices() {
     }
   });
 
+  // ScriptApp (script.scriptapp scope) is what _requireTriggerOrUnlock_ reads to believe a
+  // trigger. Unauthorised, every real trigger run falls through to the unlock and is refused.
+  // Listing the handlers also shows whether the 3×/day backup timers exist in this project.
+  try {
+    const counts = {};
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      const h = t.getHandlerFunction();
+      counts[h] = (counts[h] || 0) + 1;
+    });
+    const names = Object.keys(counts);
+    lines.push("ScriptApp  OK  triggers: " + (names.length
+      ? names.map(function (h) { return h + "×" + counts[h]; }).join(" ")
+      : "(none)"));
+  } catch (e) {
+    lines.push("ScriptApp  FAILED  " + e.message);
+  }
+
   const out = "\n  " + lines.join("\n  ") + "\n";
   Logger.log(out);
   return out;
@@ -8135,7 +9193,7 @@ function profileApp() {
   lines.push("");
   lines.push("--- producers (ms / payload bytes) ---");
 
-  // ⚠️ EVERY producer below is guarded, and since AUTH_ENFORCE=1 the guards read
+  // ⚠️ EVERY producer below is guarded, and the guards read
   // the SESSION, not the "master" argument these calls pass. Run from the editor
   // there is no session, so _effectiveRole_ returns "" and each one throws — which
   // is exactly what this function did between the flip and this fix.
@@ -8872,61 +9930,58 @@ function saveBuilding(formObject) {
     }
 
     const photoFolder = DriveApp.getFolderById(_requireConfig_(CONFIG_PHOTO_FOLDER));
-    const combineLang = (en, jp) => { en = (en == null ? '' : String(en)); jp = (jp == null ? '' : String(jp)); return (en === '' && jp === '') ? '' : (en + '\n' + jp); };
     
-    function uploadPhoto(photoObj, nameSuffix) {
-      if (photoObj && photoObj.base64) {
-        const decodedBytes = Utilities.base64Decode(photoObj.base64);
-        const blob = Utilities.newBlob(decodedBytes, photoObj.mimeType, formObject.bldgId + "_" + nameSuffix + ".jpg");
-        const file = photoFolder.createFile(blob);
-        return file.getId();
-      }
-      return "";
-    }
     
-    const exteriorId  = uploadPhoto(formObject.exteriorPhoto,  "Exterior");
-    const wm1Id       = uploadPhoto(formObject.wm1Photo,       "WM_1");
-    const wm2Id       = uploadPhoto(formObject.wm2Photo,       "WM_2");
-    const wm3Id       = uploadPhoto(formObject.wm3Photo,       "WM_3");
-    const garbage1Id  = uploadPhoto(formObject.garbage1Photo,  "Garbage_1");
-    const garbage2Id  = uploadPhoto(formObject.garbage2Photo,  "Garbage_2");
-    const garbage3Id  = uploadPhoto(formObject.garbage3Photo,  "Garbage_3");
-    const bicycle1Id  = uploadPhoto(formObject.bicycle1Photo,  "Bicycle_1");
-    const bicycle2Id  = uploadPhoto(formObject.bicycle2Photo,  "Bicycle_2");
-    const bicycle3Id  = uploadPhoto(formObject.bicycle3Photo,  "Bicycle_3");
+    const exteriorId  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.exteriorPhoto,  "Exterior");
+    const wm1Id       = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.wm1Photo,       "WM_1");
+    const wm2Id       = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.wm2Photo,       "WM_2");
+    const wm3Id       = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.wm3Photo,       "WM_3");
+    const garbage1Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.garbage1Photo,  "Garbage_1");
+    const garbage2Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.garbage2Photo,  "Garbage_2");
+    const garbage3Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.garbage3Photo,  "Garbage_3");
+    const bicycle1Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.bicycle1Photo,  "Bicycle_1");
+    const bicycle2Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.bicycle2Photo,  "Bicycle_2");
+    const bicycle3Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.bicycle3Photo,  "Bicycle_3");
+    const misc1Id     = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.misc1Photo,     "Misc_1");
+    const misc2Id     = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.misc2Photo,     "Misc_2");
+    const misc3Id     = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.misc3Photo,     "Misc_3");
 
     sheet.appendRow(_cellSafeRow_([
       formObject.bldgId, formObject.bldgNameEn, formObject.bldgNameJp,
       formObject.bldgAddressEn, formObject.bldgAddressJp,
       formObject.garbageHousehold, formObject.garbageCans, formObject.garbagePlastic,
       "", formObject.routeUrl1, formObject.routeUrl2, 
-      combineLang(formObject.garbagePlaceInfoEn, formObject.garbagePlaceInfoJp), 
-      combineLang(formObject.remarksEn, formObject.remarksJp), 
-      combineLang(formObject.waterBillEn, formObject.waterBillJp), 
-      combineLang(formObject.elecBillEn, formObject.elecBillJp), 
-      combineLang(formObject.gasBillEn, formObject.gasBillJp), 
-      combineLang(formObject.internetBillEn, formObject.internetBillJp),
-      combineLang(formObject.autoLockEn, formObject.autoLockJp), 
+      _combineLang_(formObject.garbagePlaceInfoEn, formObject.garbagePlaceInfoJp), 
+      _combineLang_(formObject.remarksEn, formObject.remarksJp), 
+      _combineLang_(formObject.waterBillEn, formObject.waterBillJp), 
+      _combineLang_(formObject.elecBillEn, formObject.elecBillJp), 
+      _combineLang_(formObject.gasBillEn, formObject.gasBillJp), 
+      _combineLang_(formObject.internetBillEn, formObject.internetBillJp),
+      _combineLang_(formObject.autoLockEn, formObject.autoLockJp), 
       formObject.garbageHouseholdBag, formObject.garbageCansBag, formObject.garbagePlasticBag,
       wm1Id, wm2Id, wm3Id, garbage1Id, garbage2Id, garbage3Id,
       formObject.garbagePaper, formObject.garbagePaperBag, bicycle1Id, bicycle2Id, bicycle3Id,
       exteriorId, 
-      combineLang(formObject.exteriorCaptionEn, formObject.exteriorCaptionJp), 
-      combineLang(formObject.wm1CaptionEn, formObject.wm1CaptionJp), 
-      combineLang(formObject.wm2CaptionEn, formObject.wm2CaptionJp), 
-      combineLang(formObject.wm3CaptionEn, formObject.wm3CaptionJp),
-      combineLang(formObject.garbage1CaptionEn, formObject.garbage1CaptionJp), 
-      combineLang(formObject.garbage2CaptionEn, formObject.garbage2CaptionJp), 
-      combineLang(formObject.garbage3CaptionEn, formObject.garbage3CaptionJp),
-      combineLang(formObject.bicycle1CaptionEn, formObject.bicycle1CaptionJp), 
-      combineLang(formObject.bicycle2CaptionEn, formObject.bicycle2CaptionJp), 
-      combineLang(formObject.bicycle3CaptionEn, formObject.bicycle3CaptionJp),
-      combineLang(formObject.otherBillEn, formObject.otherBillJp),
+      _combineLang_(formObject.exteriorCaptionEn, formObject.exteriorCaptionJp), 
+      _combineLang_(formObject.wm1CaptionEn, formObject.wm1CaptionJp), 
+      _combineLang_(formObject.wm2CaptionEn, formObject.wm2CaptionJp), 
+      _combineLang_(formObject.wm3CaptionEn, formObject.wm3CaptionJp),
+      _combineLang_(formObject.garbage1CaptionEn, formObject.garbage1CaptionJp), 
+      _combineLang_(formObject.garbage2CaptionEn, formObject.garbage2CaptionJp), 
+      _combineLang_(formObject.garbage3CaptionEn, formObject.garbage3CaptionJp),
+      _combineLang_(formObject.bicycle1CaptionEn, formObject.bicycle1CaptionJp), 
+      _combineLang_(formObject.bicycle2CaptionEn, formObject.bicycle2CaptionJp), 
+      _combineLang_(formObject.bicycle3CaptionEn, formObject.bicycle3CaptionJp),
+      _combineLang_(formObject.otherBillEn, formObject.otherBillJp),
       "",                                                            // [44] docIds (managed separately)
-      combineLang(formObject.hotWaterBillEn, formObject.hotWaterBillJp), // [45] 給湯代
+      _combineLang_(formObject.hotWaterBillEn, formObject.hotWaterBillJp), // [45] 給湯代
       String(formObject.rentDefault || "").replace(/,/g, ""),              // [46] 家賃 building default
       formObject.garbageBurnablePlastic,                             // [47] 燃えるゴミ(プラスチックを含む) day
-      formObject.garbageBurnablePlasticBag                           // [48] its bag
+      formObject.garbageBurnablePlasticBag,                          // [48] its bag
+      misc1Id, misc2Id, misc3Id,                                     // [49]-[51] その他 photos
+      _combineLang_(formObject.misc1CaptionEn, formObject.misc1CaptionJp), // [52]-[54] their captions
+      _combineLang_(formObject.misc2CaptionEn, formObject.misc2CaptionJp),
+      _combineLang_(formObject.misc3CaptionEn, formObject.misc3CaptionJp)
     ]));
     _applyBuildingInfoFormats_(sheet);
     _logActivity_(_actorFrom_(formObject, formObject.systemRole), "建物を追加", (formObject.bldgNameJp || formObject.bldgNameEn || formObject.bldgId), "");
@@ -8943,42 +9998,33 @@ function saveBuilding(formObject) {
 // Widening here, on the save paths themselves, rather than relying on a
 // migration having been run first: otherwise the deploy order becomes the bug.
 // A narrow sheet is repaired by the next save instead of breaking it.
-const BUILDING_COLS = 49;   // 0-46 legacy, 47 燃えるゴミ(プラ含む) day, 48 its bag
+const BUILDING_COLS = 55;   // 0-46 legacy, 47-48 燃えるゴミ(プラ含む) day + bag, 49-51 その他 photo ids, 52-54 their captions
+
+// Header labels for the columns added by code. ⚠️ LOAD-BEARING, not decoration:
+// _bulkReadSheets_ takes a sheet's read width from its HEADER row, so a column with a blank
+// header is invisible to getSpecificBuilding. For the その他 photos that would load the 編集
+// modal with empty existingMisc*Id fields — and the next save would write "" over every
+// stored photo id. Filled only where the cell is BLANK; a header someone typed is never
+// overwritten (CLAUDE.md: never rename a column header).
+const BUILDING_ADDED_HEADERS = {
+  49: "その他写真1", 50: "その他写真2", 51: "その他写真3",
+  52: "その他写真1キャプション", 53: "その他写真2キャプション", 54: "その他写真3キャプション"
+};
 
 function _ensureBuildingColumns_(sheet) {
   try {
     const have = sheet.getMaxColumns();
     if (have < BUILDING_COLS) sheet.insertColumnsAfter(have, BUILDING_COLS - have);
   } catch (e) { /* best-effort; a genuinely un-widenable sheet will surface at the write */ }
-}
-
-// Label the two 燃えるゴミ(プラスチックを含む) columns so the sheet stays readable
-// to a human. Purely cosmetic: nothing reads Building_Info's header row — every
-// access to this sheet is positional — so the app works whether or not this has
-// been run. _ensureBuildingColumns_ handles the part that actually matters.
-//
-// Idempotent, and safe to run on a sheet of any width.
-function migrateBuildingAddBurnablePlastic() {
-  _requireMaintenanceUnlock_("migrateBuildingAddBurnablePlastic");
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_BUILDING);
-  if (!sheet) return "Building_Info が見つかりません。";
-
-  const H_DAY = "燃えるゴミ(プラスチックを含む)";
-  const H_BAG = "燃えるゴミ(プラスチックを含む)_袋";
-
-  const before = sheet.getMaxColumns();
-  const headersBefore = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getDisplayValues()[0];
-  if (headersBefore[47] === H_DAY && headersBefore[48] === H_BAG) {
-    return "already migrated — " + before + " columns, nothing to do";
-  }
-
-  _snapshotSheet_(SHEET_BUILDING);
-  _ensureBuildingColumns_(sheet);
-  sheet.getRange(1, 48).setValue(H_DAY);   // 1-based column 48 = index 47
-  sheet.getRange(1, 49).setValue(H_BAG);   // 1-based column 49 = index 48
-  SpreadsheetApp.flush();
-  return "migrated. Building_Info widened " + before + " -> " + sheet.getMaxColumns() +
-         " columns; headers 48/49 set to " + H_DAY + " / " + H_BAG;
+  try {
+    const header = sheet.getRange(1, 1, 1, BUILDING_COLS).getValues()[0];
+    Object.keys(BUILDING_ADDED_HEADERS).forEach(function (k) {
+      const idx = Number(k);
+      if (String(header[idx] == null ? "" : header[idx]).trim() === "") {
+        sheet.getRange(1, idx + 1).setValue(BUILDING_ADDED_HEADERS[k]);
+      }
+    });
+  } catch (e) { /* best-effort, like the widening above */ }
 }
 
 function _applyBuildingInfoFormats_(sheet) {
@@ -9077,6 +10123,9 @@ function deleteBuilding(bldgId, userRole, actorName, actorId) {
 // values straight back over the real ones.
 function getSpecificBuilding(bldgId) {
   _requireSession_("getSpecificBuilding");
+  // A building's row holds its door, mailbox and Wi-Fi codes. getDormData's own rule (view_dorms,
+  // or the legacy 営業 role), so the 編集 modal opens for exactly who sees 寮管理 (2026-10-26).
+  if (!_permOrLegacyRole_("", "", "view_dorms", ["sales"])) throw new Error("権限がありません");
   const data = _readTabs_([SHEET_BUILDING])[SHEET_BUILDING] || [];
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][0]).trim() === String(bldgId).trim()) {
@@ -9095,28 +10144,21 @@ function updateBuilding(formObject) {
     _ensureBuildingColumns_(sheet);
     const photoFolder = DriveApp.getFolderById(_requireConfig_(CONFIG_PHOTO_FOLDER));
     const rowIndex = parseInt(formObject.editBldgRowIndex);
-    const combineLang = (en, jp) => { en = (en == null ? '' : String(en)); jp = (jp == null ? '' : String(jp)); return (en === '' && jp === '') ? '' : (en + '\n' + jp); };
 
-    function uploadPhoto(photoObj, nameSuffix, existingId) {
-      if (photoObj && photoObj.base64) {
-        const decodedBytes = Utilities.base64Decode(photoObj.base64);
-        const blob = Utilities.newBlob(decodedBytes, photoObj.mimeType, formObject.bldgId + "_" + nameSuffix + ".jpg");
-        const file = photoFolder.createFile(blob);
-        return file.getId();
-      }
-      return existingId || ""; 
-    }
 
-    const exteriorId  = uploadPhoto(formObject.exteriorPhoto,  "Exterior",  formObject.existingExteriorId);
-    const wm1Id       = uploadPhoto(formObject.wm1Photo,       "WM_1",      formObject.existingWm1Id);
-    const wm2Id       = uploadPhoto(formObject.wm2Photo,       "WM_2",      formObject.existingWm2Id);
-    const wm3Id       = uploadPhoto(formObject.wm3Photo,       "WM_3",      formObject.existingWm3Id);
-    const garbage1Id  = uploadPhoto(formObject.garbage1Photo,  "Garbage_1", formObject.existingGarbage1Id);
-    const garbage2Id  = uploadPhoto(formObject.garbage2Photo,  "Garbage_2", formObject.existingGarbage2Id);
-    const garbage3Id  = uploadPhoto(formObject.garbage3Photo,  "Garbage_3", formObject.existingGarbage3Id);
-    const bicycle1Id  = uploadPhoto(formObject.bicycle1Photo,  "Bicycle_1", formObject.existingBicycle1Id);
-    const bicycle2Id  = uploadPhoto(formObject.bicycle2Photo,  "Bicycle_2", formObject.existingBicycle2Id);
-    const bicycle3Id  = uploadPhoto(formObject.bicycle3Photo,  "Bicycle_3", formObject.existingBicycle3Id);
+    const exteriorId  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.exteriorPhoto,  "Exterior",  formObject.existingExteriorId);
+    const wm1Id       = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.wm1Photo,       "WM_1",      formObject.existingWm1Id);
+    const wm2Id       = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.wm2Photo,       "WM_2",      formObject.existingWm2Id);
+    const wm3Id       = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.wm3Photo,       "WM_3",      formObject.existingWm3Id);
+    const garbage1Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.garbage1Photo,  "Garbage_1", formObject.existingGarbage1Id);
+    const garbage2Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.garbage2Photo,  "Garbage_2", formObject.existingGarbage2Id);
+    const garbage3Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.garbage3Photo,  "Garbage_3", formObject.existingGarbage3Id);
+    const bicycle1Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.bicycle1Photo,  "Bicycle_1", formObject.existingBicycle1Id);
+    const bicycle2Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.bicycle2Photo,  "Bicycle_2", formObject.existingBicycle2Id);
+    const bicycle3Id  = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.bicycle3Photo,  "Bicycle_3", formObject.existingBicycle3Id);
+    const misc1Id     = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.misc1Photo,     "Misc_1",    formObject.existingMisc1Id);
+    const misc2Id     = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.misc2Photo,     "Misc_2",    formObject.existingMisc2Id);
+    const misc3Id     = _uploadBuildingPhoto_(photoFolder, formObject.bldgId, formObject.misc3Photo,     "Misc_3",    formObject.existingMisc3Id);
 
     // Both bounds come from BUILDING_COLS so they can never drift apart. If the
     // read width and the padding width disagree, the row is written back short
@@ -9138,13 +10180,13 @@ function updateBuilding(formObject) {
     existingRow[5] = formObject.garbageHousehold;
     existingRow[6] = formObject.garbageCans;
     existingRow[7] = formObject.garbagePlastic;
-    existingRow[11] = combineLang(formObject.garbagePlaceInfoEn, formObject.garbagePlaceInfoJp);
-    existingRow[12] = combineLang(formObject.remarksEn, formObject.remarksJp);
-    existingRow[13] = combineLang(formObject.waterBillEn, formObject.waterBillJp);
-    existingRow[14] = combineLang(formObject.elecBillEn, formObject.elecBillJp);
-    existingRow[15] = combineLang(formObject.gasBillEn, formObject.gasBillJp);
-    existingRow[16] = combineLang(formObject.internetBillEn, formObject.internetBillJp);
-    existingRow[17] = combineLang(formObject.autoLockEn, formObject.autoLockJp);
+    existingRow[11] = _combineLang_(formObject.garbagePlaceInfoEn, formObject.garbagePlaceInfoJp);
+    existingRow[12] = _combineLang_(formObject.remarksEn, formObject.remarksJp);
+    existingRow[13] = _combineLang_(formObject.waterBillEn, formObject.waterBillJp);
+    existingRow[14] = _combineLang_(formObject.elecBillEn, formObject.elecBillJp);
+    existingRow[15] = _combineLang_(formObject.gasBillEn, formObject.gasBillJp);
+    existingRow[16] = _combineLang_(formObject.internetBillEn, formObject.internetBillJp);
+    existingRow[17] = _combineLang_(formObject.autoLockEn, formObject.autoLockJp);
     existingRow[18] = formObject.garbageHouseholdBag;
     existingRow[19] = formObject.garbageCansBag;
     existingRow[20] = formObject.garbagePlasticBag;
@@ -9162,23 +10204,29 @@ function updateBuilding(formObject) {
     existingRow[32] = exteriorId;
     existingRow[9]  = formObject.routeUrl1 || "";
     existingRow[10] = formObject.routeUrl2 || "";
-    existingRow[33] = combineLang(formObject.exteriorCaptionEn, formObject.exteriorCaptionJp);
-    existingRow[34] = combineLang(formObject.wm1CaptionEn, formObject.wm1CaptionJp);
-    existingRow[35] = combineLang(formObject.wm2CaptionEn, formObject.wm2CaptionJp);
-    existingRow[36] = combineLang(formObject.wm3CaptionEn, formObject.wm3CaptionJp);
-    existingRow[37] = combineLang(formObject.garbage1CaptionEn, formObject.garbage1CaptionJp);
-    existingRow[38] = combineLang(formObject.garbage2CaptionEn, formObject.garbage2CaptionJp);
-    existingRow[39] = combineLang(formObject.garbage3CaptionEn, formObject.garbage3CaptionJp);
-    existingRow[40] = combineLang(formObject.bicycle1CaptionEn, formObject.bicycle1CaptionJp);
-    existingRow[41] = combineLang(formObject.bicycle2CaptionEn, formObject.bicycle2CaptionJp);
-    existingRow[42] = combineLang(formObject.bicycle3CaptionEn, formObject.bicycle3CaptionJp);
-    existingRow[43] = combineLang(formObject.otherBillEn, formObject.otherBillJp);
-    existingRow[45] = combineLang(formObject.hotWaterBillEn, formObject.hotWaterBillJp); // 給湯代
+    existingRow[33] = _combineLang_(formObject.exteriorCaptionEn, formObject.exteriorCaptionJp);
+    existingRow[34] = _combineLang_(formObject.wm1CaptionEn, formObject.wm1CaptionJp);
+    existingRow[35] = _combineLang_(formObject.wm2CaptionEn, formObject.wm2CaptionJp);
+    existingRow[36] = _combineLang_(formObject.wm3CaptionEn, formObject.wm3CaptionJp);
+    existingRow[37] = _combineLang_(formObject.garbage1CaptionEn, formObject.garbage1CaptionJp);
+    existingRow[38] = _combineLang_(formObject.garbage2CaptionEn, formObject.garbage2CaptionJp);
+    existingRow[39] = _combineLang_(formObject.garbage3CaptionEn, formObject.garbage3CaptionJp);
+    existingRow[40] = _combineLang_(formObject.bicycle1CaptionEn, formObject.bicycle1CaptionJp);
+    existingRow[41] = _combineLang_(formObject.bicycle2CaptionEn, formObject.bicycle2CaptionJp);
+    existingRow[42] = _combineLang_(formObject.bicycle3CaptionEn, formObject.bicycle3CaptionJp);
+    existingRow[43] = _combineLang_(formObject.otherBillEn, formObject.otherBillJp);
+    existingRow[45] = _combineLang_(formObject.hotWaterBillEn, formObject.hotWaterBillJp); // 給湯代
     existingRow[46] = String(formObject.rentDefault || "").replace(/,/g, ""); // 家賃 building default
     // [44] docIds is deliberately NOT assigned here — it is managed by the 別紙
     // upload/remove handlers, and writing it from the form would wipe them.
     existingRow[47] = formObject.garbageBurnablePlastic;      // 燃えるゴミ(プラスチックを含む)
     existingRow[48] = formObject.garbageBurnablePlasticBag;
+    existingRow[49] = misc1Id;                                 // その他 photos
+    existingRow[50] = misc2Id;
+    existingRow[51] = misc3Id;
+    existingRow[52] = _combineLang_(formObject.misc1CaptionEn, formObject.misc1CaptionJp);
+    existingRow[53] = _combineLang_(formObject.misc2CaptionEn, formObject.misc2CaptionJp);
+    existingRow[54] = _combineLang_(formObject.misc3CaptionEn, formObject.misc3CaptionJp);
 
     // existingRow is the whole building row read back and edited in place, so the
     // guard covers every free-text field on it in one pass.
@@ -9310,28 +10358,10 @@ function _schedDayTypeRows_() {
   return out;
 }
 
-function saveScheduleDayType(role, perms, dt) {
-  if (!_hasPerm_(role, perms, "manage_student_schedule")) throw new Error("権限がありません");
-  const name = String((dt && dt.name) || "").trim();
-  if (name === "") throw new Error("種別名を入力してください。");
-  const sh = _schedDayTypeSheet_();
-  const data = sh.getDataRange().getDisplayValues();
-  const row = _cellSafeRow_([name, String((dt && dt.order) || 0),
-                            ((dt && dt.keys) || []).join(",")]);
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0] || "").trim() === name) {
-      sh.getRange(i + 1, 1, 1, row.length).setValues([row]);
-      return { ok: true };
-    }
-  }
-  sh.appendRow(row);
-  return { ok: true };
-}
-
 // One trip for a whole 文言管理 session.
 //
-// ⚠️ WHY THIS EXISTS. saveSchedulePhrase and saveScheduleDayType each read their ENTIRE
-// sheet to write one row. 文言管理 used to call one of them per edited cell, and its
+// ⚠️ WHY THIS EXISTS. The per-row endpoints it replaced (saveSchedulePhrase / saveScheduleDayType,
+// deleted 2026-09-21 once nothing called them) each read their ENTIRE sheet to write one row. 文言管理 used to call one of them per edited cell, and its
 // success handler re-rendered the table — so typing a row of translations meant a
 // full-sheet read per cell and an async rebuild landing in the middle of the next field.
 // The screen now queues edits and sends them here once.
@@ -9401,7 +10431,7 @@ function saveSchedulePhrasesBatch(role, perms, ops) {
     upD.forEach(function (d) {
       const name = String(d.name).trim();
       // ⚠️ Located by origName, NOT by the new name. 種別名 is an editable field, and
-      // saveScheduleDayType matched on the name it was handed — so renaming 手続き found
+      // the old per-row saveScheduleDayType matched on the name it was handed — so renaming 手続き found
       // no row and APPENDED a second one, leaving the original behind. The screen hid it
       // (the client array holds one) until the next load.
       const find = String(d.origName || name).trim();
@@ -9416,17 +10446,6 @@ function saveSchedulePhrasesBatch(role, perms, ops) {
     });
   }
   return out;
-}
-
-function deleteScheduleDayType(role, perms, name) {
-  if (!_hasPerm_(role, perms, "manage_student_schedule")) throw new Error("権限がありません");
-  const sh = _schedDayTypeSheet_();
-  const data = sh.getDataRange().getDisplayValues();
-  const target = String(name || "").trim();
-  for (let i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][0] || "").trim() === target) sh.deleteRow(i + 1);
-  }
-  return { ok: true };
 }
 
 function _schedTemplateSheet_() {
@@ -9516,49 +10535,6 @@ function deleteScheduleTemplate(role, perms, name) {
     if (String(data[i][0] || "").trim() === target) sh.deleteRow(i + 1);
   }
   _logActivity_((_authUser && _authUser.name) || "", "入寮時渡すスケジュール削除", target, "");
-  return { ok: true };
-}
-
-// phrase = { key, category, text: { "日本語": "...", "English": "..." } }
-function saveSchedulePhrase(role, perms, phrase) {
-  if (!_hasPerm_(role, perms, "manage_student_schedule")) throw new Error("権限がありません");
-  const key = String((phrase && phrase.key) || "").trim();
-  if (key === "") throw new Error("キーを入力してください。");
-  const sh = _schedPhraseSheet_();
-  const data = sh.getDataRange().getDisplayValues();
-  const headers = (data[0] || []).map(function (h) { return String(h).trim(); });
-  const text = (phrase && phrase.text) || {};
-
-  // ⚠️ Built against the CURRENT header row, so a reordered or newly added column
-  // lands in the right place instead of shifting every value one to the left.
-  let row = headers.map(function (h) {
-    if (h === "キー") return key;
-    if (h === "分類") return String((phrase && phrase.category) || "");
-    return text[h] === undefined ? "" : String(text[h]);
-  });
-  row = _cellSafeRow_(row);
-
-  const kCol = headers.indexOf("キー");
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][kCol] || "").trim() === key) {
-      sh.getRange(i + 1, 1, 1, row.length).setValues([row]);
-      return { ok: true };
-    }
-  }
-  sh.appendRow(row);
-  return { ok: true };
-}
-
-function deleteSchedulePhrase(role, perms, key) {
-  if (!_hasPerm_(role, perms, "manage_student_schedule")) throw new Error("権限がありません");
-  const sh = _schedPhraseSheet_();
-  const data = sh.getDataRange().getDisplayValues();
-  const headers = (data[0] || []).map(function (h) { return String(h).trim(); });
-  const kCol = headers.indexOf("キー");
-  const target = String(key || "").trim();
-  for (let i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][kCol] || "").trim() === target) sh.deleteRow(i + 1);
-  }
   return { ok: true };
 }
 
@@ -10266,67 +11242,27 @@ function _recordEnrollmentReturns_() {
   }
 }
 
-// Reconstruct the JOINS side for months before recording began, from the
-// 学籍番号 intake prefix.
+// The 増減推移 table, REBUILT FROM DATES (2026-10-06). For every month:
 //
-// ⚠️ Joins only, and the reader must say so. Departures are genuinely
-// unrecoverable — see the warning at the top of this section — so a backfilled
-// month has a real 増 and an unknown 減. Presenting a blank 減 as zero would
-// invent a fact.
+//   入(M)   = students whose 始業日 is in M
+//   出(M)   = students whose 卒業年月日 is in M
+//   在籍(M) = students with 始業日 ≤ M and no end, or an end after M   (month end)
 //
-// Also: 在籍数 for a past month is reconstructed as "students whose intake was
-// that month or earlier, who are STILL enrolled today" — it is a lower bound on
-// the true headcount, because everyone who has since left is missing from it.
-function backfillEnrollmentHistory() {
-  _requireMaintenanceUnlock_("backfillEnrollmentHistory");
-  const sh = _getEnrolHistorySheet_();
-  const data = _readTabs_(["Central_DB"])["Central_DB"] || [];
-  if (data.length < 2) return "Central_DB が空です。";
-
-  const headers = data[0];
-  const iId = headers.indexOf("学籍番号");
-  if (iId === -1) return "学籍番号 列が見つかりません。";
-
-  const existing = sh.getDataRange().getDisplayValues();
-  let have = {};
-  for (let i = 1; i < existing.length; i++) {
-    if (String(existing[i][1]).trim() === "合計") have[String(existing[i][0]).trim()] = true;
-  }
-
-  // intake month -> how many of today's students joined then
-  let joins = {};
-  for (let i = 1; i < data.length; i++) {
-    const k = _intakeKeyFromStudentId_(data[i][iId]);
-    if (k) joins[k] = (joins[k] || 0) + 1;
-  }
-  const months = Object.keys(joins).sort();
-  if (!months.length) return "学籍番号から入学月を判定できませんでした。";
-
-  const thisMonth = _ymKey_(new Date());
-  const stamp = new Date();
-  let rows = [], running = 0, added = 0;
-  months.forEach(function (m) {
-    running += joins[m];                       // cumulative survivors, a lower bound
-    if (m >= thisMonth || have[m]) return;     // never overwrite a real measurement
-    rows.push([m, "合計", "", running, stamp, ENROL_AUTO]);
-    rows.push([m, "入学期", m, joins[m], stamp, ENROL_AUTO]);
-    added++;
-  });
-  if (!rows.length) return "追加する月はありませんでした。";
-
-  sh.getRange(sh.getLastRow() + 1, 1, rows.length, ENROL_HISTORY_HEADERS.length)
-    .setValues(rows.map(_cellSafeRow_));
-  return added + "か月分を補完しました（入学者数のみ。退学・卒業は記録開始前のため不明）。";
-}
-
-// The 増減推移 table. 減 is ARITHMETIC, not a measurement:
+// so 在籍(M) = 在籍(M−1) + 入(M) − 出(M) holds exactly, every month.
 //
-//   減(M) = 在籍数(M-1) + 増(M) − 在籍数(M)
+// ⚠️ WHY NOT THE SNAPSHOT. 在籍数 used to be the 在籍 tab's headcount at the month's last nightly
+// run, frozen at month end, while 出 counted 卒業年月日 — two sources. A student moved to a 修了
+// tab a few days into October still counted as enrolled on 30 September: September read 579 when
+// 602 − 26 = 576. The snapshot job still runs (_recordEnrollmentSnapshot_ and its roster gate),
+// as the measured record; nothing here shows it.
+// ⚠️ NEVER the arithmetic 出 = 在籍(M−1) + 入 − 在籍(M) either: on the unfinished month it reported
+// 25 departures in October that never happened.
 //
-// which is exact given the two headcounts and the joins, and needs no departure
-// dates. ⚠️ Its blind spot: a student who joins AND leaves inside the same month
-// cancels out and is invisible. The client says so rather than implying the
-// numbers are exhaustive.
+// Hand-entered (手動) months show their typed 在籍 / 入 ONLY where the dates have no figure (before
+// the first 始業日). Where the dates cover a month they win, and the typed value is reported as
+// typedIgnored (decided 2026-10-06: a typed September 入 = 1 showed a join that never happened).
+// Rows cover the current 年度 and the three before it, plus every 手動 month; `series` carries
+// every month back to the earliest 始業日 so 「＋ 前年度」 shows older years too.
 function getEnrollmentHistory(role, perms) {
   if (!_permOrLegacyRole_(role, perms, "view_students", ["sales"])) throw new Error("権限がありません");
 
@@ -10345,58 +11281,301 @@ function getEnrollmentHistory(role, perms) {
   // viewer's — the client was falling back to the browser's date.
   const today = _ymKey_(new Date());
 
+  // Only what a person typed (手動) is read from the sheet now, plus the advisory 復帰 marks.
+  let typedTotals = {}, typedJoins = {}, returned = {};
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ENROL_HISTORY);
-  if (!sh) return { rows: [], canEdit: canEdit, today: today };
-  const data = sh.getDataRange().getDisplayValues();
-
-  let totals = {}, joins = {}, intakeJoins = {}, stamps = {}, entered = {}, returned = {};
+  const data = sh ? sh.getDataRange().getDisplayValues() : [];
   for (let i = 1; i < data.length; i++) {
-    const ym = String(data[i][0] || "").trim();
+    const ym = _ymNorm_(data[i][0]);
     const kind = String(data[i][1] || "").trim();
-    const val = String(data[i][2] || "").trim();
     const n = parseInt(data[i][3], 10);
-    if (!ym || isNaN(n)) continue;
+    if (!/^\d{4}-\d{2}$/.test(ym) || isNaN(n)) continue;
     // ⚠️ Blank 入力種別 is 自動 — every row predating that column was measured.
     const manual = String(data[i][5] || "").trim() === ENROL_MANUAL;
-    if (kind === "合計") {
-      totals[ym] = n; stamps[ym] = String(data[i][4] || "");
-      if (manual) entered[ym] = true;
-    } else if (kind === "入") {
-      joins[ym] = n;                      // hand-entered joiners win
-    } else if (kind === "入学期" && val === ym) {
-      intakeJoins[ym] = n;                // the measured fallback
-    } else if (kind === ENROL_RETURN_KIND) {
-      // ⚠️ Written ONTO the suspect month by _recordEnrollmentReturns_: this many
-      // of that month's students were absent for it and back the month after, so
-      // its 合計 is probably short. 値 holds the month they came back in.
-      returned[ym] = n;
-    }
+    if (kind === "合計" && manual) typedTotals[ym] = n;
+    else if (kind === "入") typedJoins[ym] = n;          // saveEnrollmentMonths writes these, 手動
+    else if (kind === ENROL_RETURN_KIND) returned[ym] = n;
   }
 
-  const months = Object.keys(totals).sort();
+  const ser = _enrolDatedSeries_(today);
+  if (ser.error) {
+    // Never silently fall back to the snapshot: say the figures could not be built.
+    return { rows: [], canEdit: canEdit, today: today, series: {}, error: ser.error };
+  }
+
+  // The window: the current 年度 (April–March) and the three before it, through this month.
+  const y = parseInt(today.slice(0, 4), 10), mo = parseInt(today.slice(5, 7), 10);
+  const fyStart = (mo >= 4 ? y : y - 1) - 3;
+  let months = {};
+  for (let m = fyStart + "-04"; m <= today; m = _ymAdd_(m, 1)) months[m] = true;
+  Object.keys(typedTotals).forEach(function (m) { months[m] = true; });
+
+  const totalOf = function (m) {
+    const d = ser.months[m];
+    if (d) return d.total;
+    return typedTotals[m] !== undefined ? typedTotals[m] : null;
+  };
   let out = [];
-  months.forEach(function (m, i) {
-    const prev = i > 0 ? totals[months[i - 1]] : null;
-    const j = (joins[m] !== undefined) ? joins[m] : (intakeJoins[m] || 0);
-    // ⚠️ No previous month means 出 is UNKNOWN, not zero. Reporting 0 would read
-    // as "nobody left", which is a claim the data cannot make. Same for 前月差.
-    //
-    // ⚠️ And "previous" means the previous month IN THE SERIES. A gap in the
-    // record makes this the difference across that gap, not one month's churn —
-    // the client marks a month whose predecessor is missing.
-    const contiguous = (prev !== null) && _isPrevMonth_(months[i - 1], m);
-    const left = contiguous ? (prev + j - totals[m]) : null;
+  Object.keys(months).sort().forEach(function (m) {
+    const d = ser.months[m] || null;
+    const typed = typedTotals[m] !== undefined;
+    const entered = typed && !d;                 // shown only where the dates have nothing
+    const cur = totalOf(m), prev = totalOf(_ymAdd_(m, -1));
     out.push({
-      month: m, total: totals[m], joined: j, left: left,
-      net: contiguous ? (totals[m] - prev) : null,
-      entered: !!entered[m], at: stamps[m] || "",
-      // Advisory only. Nothing in the client reads it yet; without it the 復帰
-      // rows would be write-only and the detection would exist nowhere a screen
-      // can reach.
+      month: m, total: cur,
+      joined: (entered && typedJoins[m] !== undefined) ? typedJoins[m] : (d ? d.joined : null),
+      typedIgnored: (typed && d) ? { total: typedTotals[m], joined: typedJoins[m] !== undefined ? typedJoins[m] : null } : null,
+      left: d ? d.left : null,
+      // ⚠️ Unknown, not zero, when either month has no figure.
+      net: (cur === null || prev === null) ? null : (cur - prev),
+      entered: entered,
+      // Advisory only. Nothing in the client reads it yet.
       returned: returned[m] || 0
     });
   });
-  return { rows: out, canEdit: canEdit, today: today };
+  return { rows: out, canEdit: canEdit, today: today, series: ser.months,
+           noStart: ser.noStart, estimatedEnd: ser.estimatedEnd, dropped: ser.dropped, startMismatch: ser.startMismatch, startFixed: ser.startFixed };
+}
+
+// A 年月 from a date cell's display: yyyy/mm/dd (the pin) or a typed 「2025年3月31日」. "" when
+// unreadable — never guessed.
+function _enrolYm_(raw) {
+  const t = String(raw == null ? "" : raw).trim();
+  const jp = t.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月/);
+  const ym = jp ? (jp[1] + "-" + ("0" + jp[2]).slice(-2)) : _ymNorm_(t);
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(ym) ? ym : "";
+}
+
+// A student's START month (decided 2026-10-07, the maintainer's checker): the YEAR from the 学籍番号's
+// intake (202507… = 2025年7月), the MONTH from 始業日.
+//   ⚠️ 始業日's own year cannot be trusted: a 202507 student was entered as 2026/07, and counting
+//   that date as written put them in July 2026. Its month can: 202504… with a 始業日 in May joins
+//   in May.
+//   - year = the intake's year when 始業日's month ≥ the intake month, else the year after
+//     (202510 + 2月 → 2026-02);
+//   - 始業日 written with a DIFFERENT year → corrected, flagged `fixed` (src names both years), so
+//     the pop-up marks the source row to correct;
+//   - a month differing from the intake's → `mismatch`, for information only;
+//   - no YYYYMM head → a full 始業日 as written; blank / unreadable 始業日 → the intake;
+//     neither → "" (noStart).
+//   ⚠️ 始業日 must arrive as a VALUE (_enrolDateCells_): its display is MM/DD.
+function _enrolStartYm_(raw, sid) {
+  const intake = _intakeKeyFromStudentId_(sid);
+  const t = String(raw == null ? "" : raw).trim();
+  const full = _enrolYm_(t);
+  const none = { ym: "", mismatch: false, fixed: false, src: "" };
+  if (!intake) return full ? { ym: full, mismatch: false, fixed: false, src: "始業日" } : none;
+  let mo = full ? parseInt(full.slice(5, 7), 10) : 0;
+  if (!full) {
+    const md = t.match(/^(\d{1,2})\s*[\/\-.月]\s*(\d{1,2})\s*日?$/);
+    mo = md ? parseInt(md[1], 10) : 0;
+  }
+  if (!(mo >= 1 && mo <= 12)) return { ym: intake, mismatch: false, fixed: false, src: "学籍番号" };
+  const y = parseInt(intake.slice(0, 4), 10) + (mo < parseInt(intake.slice(5, 7), 10) ? 1 : 0);
+  const ym = y + "-" + (mo < 10 ? "0" + mo : String(mo));
+  const typedY = full ? parseInt(full.slice(0, 4), 10) : 0;
+  const fixed = !!full && typedY !== y;
+  return { ym: ym, mismatch: ym !== intake, fixed: fixed,
+           src: !full ? "始業日（年は学籍番号から）"
+              : (fixed ? "始業日（年を学籍番号で補正: " + typedY + "→" + y + "）" : "始業日") };
+}
+
+// The named date columns of a student sheet as VALUES, one per data row: a Date cell becomes
+// "yyyy/MM/dd" in the spreadsheet's time zone, anything else is returned as it stands. {} when the
+// sheet cannot be read, and the caller keeps the display text.
+//   ⚠️ _readTabs_ is FORMATTED_VALUE (display text), and 始業日 is displayed MM/DD in the source:
+//   whenever the copy's yyyy/mm/dd pin is missing, the display has no year. The value always has it.
+//   Rows line up with _readTabs_' rows: same sheet, both from row 2.
+function _enrolDateCells_(sheetName, headerRow, headers) {
+  let out = {};
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(sheetName);
+    if (!sh) return out;
+    const n = sh.getLastRow() - 1;
+    if (n < 1) return out;
+    const tz = ss.getSpreadsheetTimeZone();
+    headers.forEach(function (h) {
+      const c = (headerRow || []).indexOf(h);
+      if (c === -1) return;
+      out[h] = sh.getRange(2, c + 1, n, 1).getValues().map(function (r) {
+        const v = r[0];
+        return Object.prototype.toString.call(v) === "[object Date]" && !isNaN(v.getTime())
+          ? Utilities.formatDate(v, tz, "yyyy/MM/dd") : v;
+      });
+    });
+  } catch (e) { return {}; }
+  return out;
+}
+
+// The estimated end month from a 修了期 label (the tab a 修了生 was read from), for a graduate with
+// no 卒業年月日 who is on none of the app's monthly lists (_readEnrolRosters_):
+//   「2024.4~2025.3」 → 2025-03 and 「2024.3まで」 → 2024-03, the end of the range (decided
+//   2026-10-06: count them until 修了期 ends);
+//   an OPEN range 「2026.4~」 → its START, 2026-04. On no monthly list means they left before the
+//   lists began (2026-09), and "last month" put 2025071135 — gone since April per 進路 — in
+//   September's 出 (decided 2026-10-06);
+//   an unreadable label → the month before `today`, the latest it can have been.
+function _enrolCohortEndYm_(label, today) {
+  const t = String(label == null ? "" : label).replace(/\s/g, "");
+  const pick = function (x) {
+    const m = String(x || "").match(/(\d{4})\.(\d{1,2})/);
+    if (!m) return "";
+    const n = parseInt(m[2], 10);
+    return (n >= 1 && n <= 12) ? m[1] + "-" + (n < 10 ? "0" + n : String(n)) : "";
+  };
+  let end = "";
+  if (t.indexOf("~") !== -1) {
+    const parts = t.split("~");
+    end = pick(parts[1]) || pick(parts[0]);        // an open range ends at its own start
+  } else if (t.indexOf("まで") !== -1) end = pick(t);
+  return end || _ymAdd_(today, -1);
+}
+
+// Every student once (Central_DB ∪ Past_DB, Central winning a duplicate: they are enrolled now),
+// as { byId: { id: { start, end, mismatch, startSrc, est, endSrc, name, nat } } } or { error }. THE
+// per-student pass: the series sums it, and getEnrollmentMonthDetail lists it, so the two can never
+// disagree about who a month's 入 / 出 are. Headers are located by NAME.
+function _enrolPeople_(today) {
+  const SHEETS = ["Central_DB", "Past_DB"];
+  let tabs;
+  try { tabs = _readTabs_(SHEETS); }
+  catch (e) { return { error: "学生データを読み込めませんでした。" }; }
+  const lastOnList = _readEnrolRosters_();
+  let byId = {};
+  const take = function (data, past) {
+    data = data || [];
+    const h = data[0] || [];
+    const raw = _enrolDateCells_(SHEETS[past ? 1 : 0], h, past ? ["始業日", "卒業年月日"] : ["始業日"]);
+    // The VALUE where it was read, else the display text (a sheet read that failed).
+    const cell = function (hdr, col, i) {
+      if (col === -1) return "";
+      const v = raw[hdr] ? raw[hdr][i - 1] : undefined;
+      return (v === undefined || v === null || v === "") ? data[i][col] : v;
+    };
+    const iId = h.indexOf("学籍番号"), iStart = h.indexOf("始業日"), iName = h.indexOf("名前英語");
+    const iNat = h.indexOf(past ? "国籍" : "国名");
+    const iEnd = past ? h.indexOf("卒業年月日") : -1, iCohort = past ? h.indexOf("修了期") : -1;
+    if (iId === -1) return;
+    for (let i = 1; i < data.length; i++) {
+      const id = String(data[i][iId] || "").trim();
+      if (!id) continue;
+      let end = null, est = false, endSrc = "";
+      if (past) {
+        end = iEnd !== -1 ? _enrolYm_(cell("卒業年月日", iEnd, i)) : "";
+        endSrc = "卒業年月日";
+        if (!end && lastOnList[id]) {
+          // The app's own record: on the 在籍 tab at the end of L, gone by the next list. On the
+          // current month's list means moved since last night — leaving this month.
+          const L = lastOnList[id];
+          end = L >= today ? today : _ymAdd_(L, 1);
+          endSrc = "在籍リストから外れた月";
+        }
+        if (!end) {
+          const cohort = iCohort !== -1 ? String(data[i][iCohort] || "").trim() : "";
+          end = _enrolCohortEndYm_(cohort, today); est = true;
+          endSrc = "修了期で推定（" + (cohort || "不明") + "）";
+        }
+      }
+      const st = _enrolStartYm_(cell("始業日", iStart, i), id);
+      byId[id] = { start: st.ym, mismatch: st.mismatch, fixed: st.fixed, startSrc: st.src, end: end, est: est, endSrc: endSrc,
+                   name: iName !== -1 ? String(data[i][iName] || "").trim() : "",
+                   nat: iNat !== -1 ? String(data[i][iNat] || "").trim() : "" };
+    }
+  };
+  take(tabs.Past_DB, true);
+  take(tabs.Central_DB, false);     // after Past_DB: Central wins a duplicate
+  return { byId: byId };
+}
+
+// Every 学籍番号 on the app's monthly 在籍 lists (Enrollment_Roster, since 2026-09-03), with the
+// LAST month it appears: { id: "YYYY-MM" }. One read for every student. A 修了生 with no 卒業年月日
+// left in the month after that — the app's own timestamp, exact from 2026-09 on. Unreadable → {}
+// (the 修了期 estimate applies), never a thrown error.
+function _readEnrolRosters_() {
+  let last = {};
+  try {
+    const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ENROL_ROSTER);
+    if (!sh) return last;
+    const data = sh.getDataRange().getDisplayValues();
+    for (let i = 1; i < data.length; i++) {
+      const ym = _ymNorm_(data[i][0]);
+      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+      String(data[i][2] || "").split(",").forEach(function (raw) {
+        const id = raw.trim();
+        if (id && (!last[id] || ym > last[id])) last[id] = ym;
+      });
+    }
+  } catch (e) { return {}; }
+  return last;
+}
+
+// The month a leaver stops being counted (their 出). End-of-month enrolment, EXCEPT March: immigration
+// counts a student who left in March as enrolled in March (decided 2026-10-07, March only — the
+// one-day rule applied to every month would make September 602, which was rejected). So a March
+// end is counted out in April. ONE rule for the series and the month list, so they cannot disagree.
+function _enrolOutYm_(end) {
+  return (end && end.slice(5, 7) === "03") ? _ymAdd_(end, 1) : end;
+}
+
+// Who is behind one month's 入 and 出 in 増減推移: the same people _enrolDatedSeries_ counts, with
+// where each date came from (始業日 / 学籍番号 / 卒業年月日 / 修了期で推定), so an estimate that lands
+// in the wrong month can be named from the screen. Same gate as getEnrollmentHistory.
+function getEnrollmentMonthDetail(ym) {
+  if (!_permOrLegacyRole_("", "", "view_students", ["sales"])) throw new Error("権限がありません");
+  const m = String(ym == null ? "" : ym).trim();
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(m)) throw new Error("年月が正しくありません。");
+  const today = _ymKey_(new Date());
+  const people = _enrolPeople_(today);
+  if (people.error) throw new Error(people.error);
+  let joined = [], left = [];
+  Object.keys(people.byId).sort().forEach(function (id) {
+    const p = people.byId[id];
+    // The series' own exclusions, so the lists sum to exactly what the table shows.
+    if (!p.start || (p.end && p.end < p.start) || p.start > today) return;
+    const row = { id: id, name: p.name, nat: p.nat, start: p.start, end: p.end || "" };
+    if (p.start === m) joined.push(Object.assign({ src: p.startSrc }, row));
+    if (p.end && _enrolOutYm_(p.end) === m) left.push(Object.assign({ src: p.endSrc }, row));
+  });
+  return { ym: m, joined: joined, left: left };
+}
+
+// Every student's start and end month, summed per month from the earliest 始業日 through `today`:
+// { months: { ym: { total, joined, left } }, first, noStart, estimatedEnd, dropped } or { error }.
+// One person per 学籍番号, Central_DB winning a duplicate (they are enrolled now). Headers are
+// located by NAME. Central_DB has no end; Past_DB ends at 卒業年月日, else at its 修了期's end
+// (estimatedEnd). The start is 始業日's month in the 学籍番号's year (_enrolStartYm_; startFixed counts
+// corrected years, startMismatch months differing from the intake); with neither → nowhere (noStart). An end before the start → dropped.
+// ⚠️ A student ending in M is NOT enrolled at the end of M — that is what makes 602 − 26 = 576 —
+// except in March, which immigration counts as enrolled (_enrolOutYm_: 出 lands in April).
+function _enrolDatedSeries_(today) {
+  const people = _enrolPeople_(today);
+  if (people.error) return { error: people.error };
+  let joined = {}, left = {}, first = "", noStart = 0, estimatedEnd = 0, dropped = 0, startMismatch = 0, startFixed = 0;
+  Object.keys(people.byId).forEach(function (id) {
+    const p = people.byId[id];
+    if (!p.start) { noStart++; return; }
+    if (p.end && p.end < p.start) { dropped++; return; }
+    if (p.start > today) return;     // a future intake already listed: counted when it starts
+    if (p.mismatch) startMismatch++;
+    if (p.fixed) startFixed++;
+    joined[p.start] = (joined[p.start] || 0) + 1;
+    if (!first || p.start < first) first = p.start;
+    if (p.end) {
+      const out = _enrolOutYm_(p.end);
+      left[out] = (left[out] || 0) + 1;
+      if (p.est) estimatedEnd++;
+    }
+  });
+  let months = {}, run = 0;
+  if (first) {
+    for (let m = first; m <= today; m = _ymAdd_(m, 1)) {
+      const j = joined[m] || 0, l = left[m] || 0;
+      run += j - l;
+      months[m] = { total: run, joined: j, left: l };
+    }
+  }
+  return { months: months, first: first, noStart: noStart, estimatedEnd: estimatedEnd, dropped: dropped, startMismatch: startMismatch, startFixed: startFixed };
 }
 
 // Is `b` the calendar month immediately after `a`? Both "YYYY-MM".
@@ -10655,6 +11834,9 @@ function _getBuildingDataForPdf_(buildingId) {
         // exactly what hides the row on the PDF.
         garbageBurnablePlastic: bldgData[i][47] || "",      // 燃えるゴミ(プラスチックを含む)
         garbageBurnablePlasticBag: bldgData[i][48] || "",
+        // その他 photos — blank on every building saved before 2026-10-01.
+        misc1Id: bldgData[i][49] || "", misc2Id: bldgData[i][50] || "", misc3Id: bldgData[i][51] || "",
+        misc1Caption: bldgData[i][52] || "", misc2Caption: bldgData[i][53] || "", misc3Caption: bldgData[i][54] || "",
         docIds: bldgData[i][44] || ""   // comma-separated Drive file IDs of attached documents
       };
       break;
@@ -10841,14 +12023,19 @@ function _buildRoomHtml_(roomData, bldgData) {
 function _buildRoomHtmlInner_(roomData, bldgData) {
   let htmlString = HtmlService.createHtmlOutputFromFile('Template').getContent();
   
-  const replaceTag = (tag, value) => { 
-    let safeValue = value || "";
-    if (typeof safeValue === 'string') {
-      // Trim leading/trailing newlines so an EN-only ("text\n") or JP-only
-      // ("\ntext") combined value doesn't render an empty line in the PDF.
-      safeValue = safeValue.replace(/^\n+/, '').replace(/\n+$/, '').replace(/\n/g, '<br>');
-    }
-    htmlString = htmlString.replace(new RegExp("{{" + tag + "}}", "g"), safeValue); 
+  // ⚠️ ESCAPED (2026-10-26). Building and room fields are typed by staff, and this inserted
+  // them raw, so a 備考 or Wi-Fi line holding markup became markup in the PDF. The utility and
+  // photo blocks below always escaped; this was the odd one out. The tags that carry HTML-ish
+  // values (QR_* / Image_* data URIs, DISPLAY_* CSS) contain none of & < > ", so escaping
+  // leaves them byte-identical. Escape FIRST, then turn \n into <br>.
+  // ⚠️ A FUNCTION replacement: a string one reads $& / $1 typed into a field as a pattern.
+  const escTag = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const replaceTag = (tag, value) => {
+    let safeValue = String(value || "");
+    // Trim leading/trailing newlines so an EN-only ("text\n") or JP-only
+    // ("\ntext") combined value doesn't render an empty line in the PDF.
+    safeValue = escTag(safeValue.replace(/^\n+/, '').replace(/\n+$/, '')).replace(/\n/g, '<br>');
+    htmlString = htmlString.replace(new RegExp("{{" + tag + "}}", "g"), function () { return safeValue; });
   };
 
   // Format rent with thousands separators for display (e.g. 45000 -> 45,000).
@@ -10998,14 +12185,20 @@ function _buildRoomHtmlInner_(roomData, bldgData) {
       { title: "洗濯機 / Washing Machine", id: bldgData.wm3Id, cap: bldgData.wm3Caption },
       { title: "駐輪場 / Bicycle Parking", id: bldgData.bicycle1Id, cap: bldgData.bicycle1Caption },
       { title: "駐輪場 / Bicycle Parking", id: bldgData.bicycle2Id, cap: bldgData.bicycle2Caption },
-      { title: "駐輪場 / Bicycle Parking", id: bldgData.bicycle3Id, cap: bldgData.bicycle3Caption }
+      { title: "駐輪場 / Bicycle Parking", id: bldgData.bicycle3Id, cap: bldgData.bicycle3Caption },
+      { title: "その他 / Other", id: bldgData.misc1Id, cap: bldgData.misc1Caption },
+      { title: "その他 / Other", id: bldgData.misc2Id, cap: bldgData.misc2Caption },
+      { title: "その他 / Other", id: bldgData.misc3Id, cap: bldgData.misc3Caption }
     ];
 
     // Collect only the photos that actually have an image.
     const present = photos.filter(p => p.id);
 
-    const PER_ROW = 3;
+    // ⚠️ 4 per row only past 9 photos. The その他 group (2026-10-01) raised the maximum to 12,
+    // which at 3 per row is a 4th row and a second page. Four per row keeps it to three rows at
+    // the same 88px, and a building with 9 or fewer photos renders exactly as before.
     const totalCount = present.length;
+    const PER_ROW = totalCount > 9 ? 4 : 3;
     const totalRows = Math.ceil(totalCount / PER_ROW);
 
     // Image height scales with how many ROWS of photos there are, so the whole
@@ -11017,7 +12210,7 @@ function _buildRoomHtmlInner_(roomData, bldgData) {
 
     // Width by how many cards share a row, so a 1- or 2-card row spreads out
     // (fewer photos render wider) instead of crowding one side.
-    const widthByRowCount = { 1: 60, 2: 48, 3: 31 };
+    const widthByRowCount = { 1: 60, 2: 48, 3: 31, 4: 23 };
 
     let cardsHtml = "";
     for (let i = 0; i < present.length; i += PER_ROW) {
@@ -11030,7 +12223,7 @@ function _buildRoomHtmlInner_(roomData, bldgData) {
       let rowHtml = '<div style="text-align: center; margin-top: 4px;">';
       rowItems.forEach(p => {
         const captionHtml = p.cap
-          ? '<div style="font-size: 9px; color: #555; margin-top: 1px;">' + capHtml(p.cap) + '</div>'
+          ? '<div style="font-size: 9px; color: #555; margin-top: 1px; text-align: left;">' + capHtml(p.cap) + '</div>'
           : '';
         rowHtml +=
           '<div style="display: inline-block; vertical-align: top; width: ' + w + '%; margin: 0 1%; box-sizing: border-box; text-align: center;">' +
@@ -11595,16 +12788,16 @@ function _readDormSyncReport_() {
   } catch (e) { return null; }
 }
 
-// Runs unattended from a time trigger, so it CANNOT use the maintenance unlock:
-// a locked-out trigger fails daily and the sync silently stops. It is also
-// web-callable like everything else, and it hands itself the "admin" role, so
-// anyone could hammer it.
+// Runs unattended from a time trigger, so the trigger itself CANNOT need the maintenance
+// unlock: a locked-out trigger fails daily and the sync silently stops. It is also
+// web-callable like everything else, and it hands itself the master role.
 //
-// A throttle is the right shape here rather than a gate. It bounds the abuse to
-// what the trigger legitimately does anyway — at worst one sync per 10 minutes,
-// against a trigger that runs far less often than that — while never refusing
-// the trigger itself.
-function triggerAutoSyncStudents() {
+// ⚠️ GATED by _requireTriggerOrUnlock_ (2026-10-26): a real trigger passes on its triggerUid,
+// an editor Run needs the unlock, a browser gets neither. The throttle below stays as a second
+// bound, but it is no longer the guard: set before any check, it let an anonymous call make
+// the real trigger skip.
+function triggerAutoSyncStudents(e) {
+  _requireTriggerOrUnlock_(e, "triggerAutoSyncStudents");
   try {
     const cache = CacheService.getScriptCache();
     if (cache.get('autoSyncRan')) {
@@ -11613,11 +12806,10 @@ function triggerAutoSyncStudents() {
     }
     cache.put('autoSyncRan', '1', AUTO_SYNC_MIN_GAP_SEC);
   } catch (e) { /* no cache — the trigger must still work, so fall through */ }
-  // ⚠️ The trigger runs unattended, so there is no session — and once
-  // AUTH_ENFORCE=1 the guards read the session, not the argument. Passing "admin"
-  // works today only because observe mode still trusts the argument; at the flip
-  // this would start throwing 権限がありません every night and the sync would stop
-  // with nothing on screen to show for it.
+  // ⚠️ The trigger runs unattended, so there is no session — and the guards read
+  // the session, not the argument. Passing "admin" alone would be refused with
+  // 権限がありません every night, and the sync would stop with nothing on screen to
+  // show for it.
   //
   // A time trigger IS the authorisation: it exists because the owner created it.
   // So state that explicitly rather than leaving the call to be silently denied.
@@ -11719,16 +12911,11 @@ function _apiMethods_() {
     deletePlacementConfig: deletePlacementConfig,
     deleteRoom: deleteRoom,
     deleteSystemUser: deleteSystemUser,
-    diagnoseInChargeMatching: diagnoseInChargeMatching,
     exportSpecificPDF: exportSpecificPDF,
     getScheduleBundle: getScheduleBundle,
     saveScheduleTemplate: saveScheduleTemplate,
     deleteScheduleTemplate: deleteScheduleTemplate,
-    saveSchedulePhrase: saveSchedulePhrase,
-    deleteSchedulePhrase: deleteSchedulePhrase,
     addScheduleLanguage: addScheduleLanguage,
-    saveScheduleDayType: saveScheduleDayType,
-    deleteScheduleDayType: deleteScheduleDayType,
     getScheduleApplicants: getScheduleApplicants,
     downloadSchedulePdf: downloadSchedulePdf,
     getActivityLog: getActivityLog,
@@ -11748,6 +12935,7 @@ function _apiMethods_() {
     getDestinationReport: getDestinationReport,
     getDestinationDetail: getDestinationDetail,
     getEnrollmentHistory: getEnrollmentHistory,
+    getEnrollmentMonthDetail: getEnrollmentMonthDetail,
     saveEnrollmentMonths: saveEnrollmentMonths,
     getPastStudentDetail: getPastStudentDetail,
     getGraduateExport: getGraduateExport,
@@ -11772,13 +12960,15 @@ function _apiMethods_() {
     getSpecificBuilding: getSpecificBuilding,
     getSystemUsers: getSystemUsers,
     getTeacherNotifications: getTeacherNotifications,
+    getIncomingStudents: getIncomingStudents,
+    setIncomingState: setIncomingState,
+    getStoredFileNames: getStoredFileNames,
     getUploadedFile: getUploadedFile,
     importResultsFromBookings: importResultsFromBookings,
     listAnnouncements: listAnnouncements,
     lookupPriorInterviewResult: lookupPriorInterviewResult,
     markAnnouncementRead: markAnnouncementRead,
     postAnnouncement: postAnnouncement,
-    rejectBookerDateChange: rejectBookerDateChange,
     removeBuildingDoc: removeBuildingDoc,
     renameBuildingDoc: renameBuildingDoc,
     removeRecruitmentMeta: removeRecruitmentMeta,
@@ -11824,6 +13014,7 @@ function _apiMethods_() {
     signOutMySession: signOutMySession,
     signOutMyOtherSessions: signOutMyOtherSessions,
     updateBuilding: updateBuilding,
+    updateIncomingStudent: updateIncomingStudent,
     updateInterviewResult: updateInterviewResult,
     updateRoom: updateRoom,
     uploadBuildingDoc: uploadBuildingDoc,

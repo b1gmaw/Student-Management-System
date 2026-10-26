@@ -63,7 +63,7 @@ const GUARDS = ['_hasPerm_', '_hasRecruitPerm_', '_hasResultPerm_', '_isAdminRol
                 // than the client-supplied staffName, and throws 権限がありません.
                 // The two 日時変更 actions guard through it.
                 '_requirePendingDateChangeRow_',
-                '_isMasterRole_', '_roleIsAnyOf_', '_requireSession_', '_requirePerm_',
+                '_isMasterRole_', '_roleIsAnyOf_', '_requireSession_',
                 'resumeSession', '_requireMaintenanceUnlock_',
                 // The one session decision resumeSession now wraps. checkSession calls it
                 // directly so that it does NOT touch LastSeen; it still resolves the token.
@@ -80,11 +80,13 @@ const guarded = function (n) { return hasGuard(B[n]); };
 // Run by hand from the Apps Script editor. Staff never invoke these, so the
 // maintenance unlock can be absolute — it is a script property holding today's
 // date, and PropertiesService is writable only from Project Settings.
-const MAINTENANCE = ['auditAccountReadiness', 'authEnforceStatus', 'authoriseServices', 'checkSystemPin',
+const MAINTENANCE = ['authoriseServices', 'checkSystemPin',
   'diagnoseLastYearCounts', 'diagnoseDestinations', 'diagnoseDestinationSource', 'diagnoseUnclassified', 'diagnoseDestinationConflicts',
   'systemPinStatus', 'profileApp', 'profileSnapshot', 'profilePasswordHash', 'profileRecruitMeta',
-  'migrateAddPasswordColumns', 'migrateBuildingAddBurnablePlastic',
-  'migrateOtherVisaAddDesiredColumn', 'revokeHearingSheetSharing', 'diagnoseScheduleDuplicates'];
+  'diagnoseScheduleDuplicates',
+  'probeSheetsTextInput', 'diagnoseShinseiFormulaCells', 'migrateShinseiFormulaCells',
+  'diagnoseShinseiExamNames', 'migrateShinseiExamNames',
+  'diagnoseHomeUpcoming'];
 
 // Runs unattended from a time trigger, so it cannot be locked — a refused
 // trigger means the sync silently stops. Throttled instead.
@@ -154,7 +156,23 @@ console.log("\n1. maintenance functions are locked, not merely renamed");
       "an early throw would leave a master session parked for the rest of the execution");
   });
 
+  // ⚠️ 2026-10-26: the throttle alone let ANYONE run these with master rights, and because it
+  // was set before any check, an anonymous call made the real trigger skip. The gate believes
+  // a triggerUid only if it names a real project trigger, else it needs the unlock.
+  check("_requireTriggerOrUnlock_ checks the uid against the project's real triggers",
+    /ScriptApp\.getProjectTriggers\(\)/.test(stripComments(B._requireTriggerOrUnlock_ || "")) &&
+    /getUniqueId\(\)/.test(stripComments(B._requireTriggerOrUnlock_ || "")),
+    "a uid the browser sent is believed without a lookup");
+  check("...and falls back to the maintenance unlock, never to running",
+    // A body slice runs to the NEXT function, so cut at this one's closing brace first.
+    /_requireMaintenanceUnlock_\(what\);\s*$/.test(stripComments(B._requireTriggerOrUnlock_ || "").split("\n}")[0]),
+    "the fallback must be the unlock, last");
   THROTTLED.forEach(function (n) {
+    const body = stripComments(B[n] || "");
+    const gate = body.indexOf('_requireTriggerOrUnlock_(e,'), thr = body.indexOf('_MIN_GAP_SEC');
+    check(n + " is gated by the trigger check", gate !== -1, "web-callable with master rights");
+    check(n + " gates BEFORE the throttle", gate !== -1 && thr !== -1 && gate < thr,
+      "a refused call that sets the throttle makes the real trigger skip");
     check(n + " is throttled rather than locked",
       /[A-Z_]+_MIN_GAP_SEC/.test(B[n] || ""),
       "it runs unattended, so a lock would silently stop the sync");
@@ -310,9 +328,20 @@ console.log("\n3.1 no guard condition reads a client-supplied value directly");
   check("_hasPerm_ resolves permissions through _effectivePerms_",
     /function _hasPerm_\([^)]*\) \{[\s\S]{0,220}?_effectivePerms_\(/.test(auth),
     "the one helper every endpoint leans on no longer reads the session");
-  check("_effectiveRole_ returns the session's role when enforcing",
-    /function _effectiveRole_\([^)]*\) \{\s*\n\s*if \(_authEnforcing_\(\)\) return _authUser \? String\(_authUser\.role/.test(auth),
-    "enforcing mode must ignore the argument entirely");
+  // ⚠️ There is NO mode switch since 2026-09-21: both helpers read ONLY the session. A body that
+  // reads its argument can return it, and returning it is exactly what observe mode did — which an
+  // unreadable AUTH_ENFORCE property silently switched on. So the argument must not appear in the
+  // body at all (the signature keeps it only until D1 removes it from the callers).
+  const helperBody = function (n) {
+    const i = auth.indexOf('function ' + n + '(');
+    return i < 0 ? '' : auth.slice(auth.indexOf('{', i), auth.indexOf('\n}\n', i));
+  };
+  check("_effectiveRole_ returns the session's role, and never reads its argument",
+    /^\{\s*return _authUser \? String\(_authUser\.role \|\| ""\) : "";\s*$/.test(helperBody('_effectiveRole_')),
+    "a claimed-role fallback here trusts the browser: " + helperBody('_effectiveRole_'));
+  check("_effectivePerms_ returns the session's permissions, and never reads its argument",
+    /^\{\s*return _authUser \? _authUser\.permissions : "";\s*$/.test(helperBody('_effectivePerms_')),
+    "a claimed-permissions fallback here trusts the browser: " + helperBody('_effectivePerms_'));
 }
 
 console.log("\n3.2 the page cannot be framed by an arbitrary site");
@@ -406,6 +435,108 @@ console.log("\n9. every endpoint the client calls is in the apiCall registry");
   registry.forEach(function (n) { if (!serverFns.has(n)) dead.push(n); });
   check("...and every registry entry names a function that exists", dead.length === 0,
     "_apiMethods_() would throw on first use and take every call down with it: " + dead.join(', '));
+}
+
+console.log("\n10. an endpoint no button uses is PRIVATE, not merely unregistered");
+{
+  // D4 of the 2026-09 cleanup review. rejectBookerDateChange had no caller and stayed
+  // reachable. ⚠️ Dropping the registry line alone would not have closed it: a public
+  // top-level function is callable through google.script.run whatever _apiMethods_() says.
+  // Only a name ending in _ hides it (section 1.1).
+  const CODE = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8');
+  check("_rejectBookerDateChange_ is kept, as a private helper",
+    /^function _rejectBookerDateChange_\(/m.test(CODE));
+  check("...with no public spelling left", !/^function rejectBookerDateChange\(/m.test(CODE),
+    "a public name is on google.script.run, registered or not");
+  check("...and no registry line", !/^\s*_?rejectBookerDateChange_?: /m.test(CODE));
+}
+
+console.log("\n11. no NEW endpoint takes role / perms from the browser (ratchet)");
+{
+  // D1 of the 2026-09 cleanup review. The server ignores these arguments — _effectiveRole_ and
+  // _effectivePerms_ read the SESSION — yet 100 endpoints still declare them and 83 client calls
+  // still send them. They make the browser look like it decides access, which is how the
+  // "guard OR'd with a client value" hole got written twelve times (section 3.1).
+  //
+  // Decided: freeze, then drop them one screen at a time when that screen is next changed.
+  // ⚠️ These are CEILINGS. When a screen drops its arguments, LOWER the number in the same
+  // commit; never raise it. A new endpoint takes neither argument — it asks _hasPerm_("", "", x),
+  // which reads the session.
+  const SERVER_MAX = 99, CLIENT_MAX = 83;   // 100 → 99: diagnoseInChargeMatching removed (2026-10-26)
+  const SRC = fs.readFileSync(path.join(ROOT, 'Code.js'), 'utf8') + '\n'
+            + fs.readFileSync(path.join(ROOT, 'Shinsei_Code.js'), 'utf8');
+  const HTML = fs.readFileSync(path.join(ROOT, 'Index.html'), 'utf8');
+  const AUTH = /^(role|userRole|systemRole|callerRole|perms|userPerms|permissions)$/;
+  const count = (src) => [...src.matchAll(/^function ([A-Za-z]\w*)\s*\(([^)]*)\)/gm)]
+    .filter(m => !m[1].endsWith('_'))
+    .filter(m => m[2].split(',').map(s => s.trim()).some(p => AUTH.test(p))).length;
+  // The pair is the shape every such call uses; a lone currentUser.role is also read for
+  // display and behaviour, so it is not counted.
+  const pairs = (src) => (src.match(/currentUser\.role\s*,\s*currentUser\.permissions/g) || []).length;
+
+  const n = count(SRC), c = pairs(HTML);
+  check("server: public functions taking role/perms ≤ " + SERVER_MAX + " (now " + n + ")", n <= SERVER_MAX,
+    "a new endpoint must not take role/perms — the server reads the session. If a screen dropped them, lower SERVER_MAX.");
+  check("client: calls sending currentUser.role, currentUser.permissions ≤ " + CLIENT_MAX + " (now " + c + ")", c <= CLIENT_MAX,
+    "a new call must not send role/perms. If a screen dropped them, lower CLIENT_MAX.");
+  if (n < SERVER_MAX || c < CLIENT_MAX) console.log("        (below the ceiling — lower SERVER_MAX / CLIENT_MAX to lock it in)");
+
+  // Mutation: one new endpoint and one new call must each trip it.
+  check("mutation: a new public function(role, perms) trips the server ratchet",
+    count(SRC + "\nfunction newThing(role, perms, x) {}\n") > SERVER_MAX);
+  check("mutation: a private helper does NOT count", count(SRC + "\nfunction _newThing_(role, perms) {}\n") === n);
+  check("mutation: a new call sending both trips the client ratchet",
+    pairs(HTML + "apiRun().x(currentUser.role, currentUser.permissions);") > CLIENT_MAX);
+}
+
+console.log("\n12. a session is AUTHENTICATION, not authorization");
+{
+  // ⚠️ GUARDS above counts _requireSession_, so "somebody is signed in" passed for "may do
+  // this". Measured 2026-10-26: 申請関連's five data endpoints let a 教務 (no view_shinsei) read
+  // and delete every applicant record, and 面接スケジュール's saves let any account overwrite
+  // any teacher's slots, while §2 reported them guarded. Every public function whose ONLY
+  // guard is the session must be named here. The list may only SHRINK.
+  const AUTHZ = GUARDS.filter(function (g) {
+    return ['_requireSession_', 'resumeSession', '_sessionLookup_'].indexOf(g) === -1;
+  }).concat(['_requireShinseiPerm_', '_requireShinseiExport_', '_scheduleDenyReason_',
+             '_reassignResponderId_', '_requireTriggerOrUnlock_']);
+  // Where the decision lives in a private helper the endpoint always calls. Explicit, never
+  // inferred: a helper that merely MENTIONS _hasPerm_ must not vouch for its caller.
+  const DELEGATES = { saveScheduleBatch: '_saveScheduleBatchLocked_' };
+  const SESSION_ONLY_KNOWN = [
+    // Self-scoped: the session's own account is the subject, so signed-in IS the permission.
+    'signOutMySession', 'signOutMyOtherSessions', 'markAnnouncementRead',
+    // Self-scoped since 2026-10-26 (finding 7): the feed is the session's own teacher id / 担当
+    // name; the argument is ignored. authz.test §5 runs both with a colleague's id and name.
+    'getTeacherNotifications', 'getPendingNotifications'
+  ].sort();
+  const authorizes = function (body) {
+    const b = stripComments(body || "");
+    return AUTHZ.some(function (g) { return b.indexOf(g) !== -1; });
+  };
+  const sessionOnly = function (src) {
+    return EXPOSED.filter(function (n) {
+      const b = stripComments(src[n] || "");
+      if (b.indexOf('_requireSession_(') === -1) return false;
+      if (authorizes(b)) return false;
+      return !(DELEGATES[n] && authorizes(src[DELEGATES[n]]));
+    }).sort();
+  };
+  const found = sessionOnly(B);
+  const extra = found.filter(function (n) { return SESSION_ONLY_KNOWN.indexOf(n) === -1; });
+  const gone = SESSION_ONLY_KNOWN.filter(function (n) { return found.indexOf(n) === -1; });
+  check("no endpoint rests on the session alone beyond the known list", extra.length === 0,
+    "signed-in only: " + extra.join(", ") + ", so ask _hasPerm_ for the permission its screen gates on");
+  check("the known list holds nothing that has since been fixed (it only shrinks)", gone.length === 0,
+    "remove from SESSION_ONLY_KNOWN: " + gone.join(", "));
+  // Mutation: a new session-only writer, and the delegation removed, must each trip it.
+  const mut1 = Object.assign({}, B, { newWriter: 'function newWriter(x) {\n  _requireSession_("newWriter");\n  sh.appendRow([x]);\n}\n' });
+  EXPOSED.push('newWriter');
+  check("  mutation: a new session-only endpoint is caught", sessionOnly(mut1).indexOf('newWriter') !== -1, "");
+  EXPOSED.pop();
+  const mut2 = Object.assign({}, B, { _saveScheduleBatchLocked_: (B._saveScheduleBatchLocked_ || "").replace(/_scheduleDenyReason_/g, '_x_') });
+  check("  mutation: the schedule save without its decision is caught",
+    sessionOnly(mut2).indexOf('saveScheduleBatch') !== -1, "");
 }
 
 console.log("\n" + (fail === 0 ? "ALL " + pass + " CHECKS PASSED" : pass + " passed, " + fail + " FAILED"));

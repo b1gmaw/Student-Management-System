@@ -80,7 +80,11 @@ console.log("\n2. ordinary data is left exactly alone");
   // would break every lookup that plainly should work.
   const SAFE = ['さくら寮', 'Sakura Building', 'A-101', '2026年4月', '',
                 'student@example.com', '@handle', '-5', '-5.25', '0123',
-                'https://meet.google.com/abc', '１０１号室'];
+                'https://meet.google.com/abc', '１０１号室',
+                // ⚠️ MEASURED inert (probeSheetsTextInput, staging 2026-09-15): Sheets stores
+                // full-width ＋ ＝ － and a zero-width space before + as TEXT on every write path.
+                // Prefixing them would widen the guard for a threat that does not exist.
+                '＋81 75 123 4567', '＝1+1', '－3', '​+81 75'];
   SAFE.forEach(function (s) {
     check("untouched: " + JSON.stringify(s), _cellSafe_(s) === s, "got: " + _cellSafe_(s));
   });
@@ -251,7 +255,15 @@ console.log("\n7. ⚠️ the guard strips CONTROL characters, and the source say
     /v\.replace\(\/\^\[\\s\\x00-\\x1f\]\+\/, ""\)/.test(CODE),
     "raw control bytes parse and behave, but make grep skip the whole file in silence");
   // ⚠️ The real regression guard. Nothing here is worth much if the bytes come back.
+  // ⚠️ The DRIVER is scanned too, since 2026-09-16: a NUL written there as a string separator
+  // made `file` report it as binary and every grep over it return nothing — the same silent
+  // failure, in the one file this check did not cover. It is a dev tool, but an ungreppable
+  // dev tool costs exactly what an ungreppable source does.
   const RAW = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
+  const DRIVER = fs.readFileSync(path.join(ROOT, '.claude/skills/run-local/driver.mjs'), 'utf8');
+  check("⚠️ the local render driver carries no stray control byte either",
+    !RAW.test(DRIVER),
+    "`file` calls such a driver binary, and grep then skips it in silence");
   check("⚠️ neither source file carries a stray control byte at all",
     !RAW.test(CODE) && !RAW.test(HTML),
     "`file` reports such a file as data; grep then returns nothing, exit 1, no warning");

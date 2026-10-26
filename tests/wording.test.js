@@ -42,12 +42,9 @@ const JP = /[ぁ-んァ-ン一-龯]/;
 // OF A FUNCTION, not a message — so rewording a user-facing string cannot
 // accidentally satisfy an entry here.
 const ALLOWED = {
-  authEnforceStatus: "editor-run auth diagnostic; prints tab names on purpose",
   diagnoseDestinations: "editor-run diagnostic for the 決定進路 sync",
   diagnoseLastYearCounts: "editor-run diagnostic for the 前年 figures",
   profileRecruitMeta: "editor-run timing of the 国名 delete; names the sheets it times, on purpose",
-  migrateBuildingAddBurnablePlastic: "one-off column migration, run from the editor",
-  backfillEnrollmentHistory: "one-off backfill, run from the editor",
   // ⚠️ The restore prompt asks the user to TYPE the sheet name to confirm. The
   // string being technical is what makes a destructive overwrite hard to do by
   // accident — softening it would weaken the guard, not the wording.

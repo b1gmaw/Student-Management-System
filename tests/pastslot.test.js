@@ -109,10 +109,18 @@ function runBatch(rows, updates, opts) {
   };
   // _normName_: the ownership check runs only when a slot was ALREADY booked, so without it
   // every existing-booking case throws a ReferenceError that looks like a refusal.
-  const sources = [codeFn('_normName_'), codeFn('_schedKey_'), codeFn('_slotIsPast_'), codeFn('_activeRequest_'),
+  // The caller is the 営業 丁村 through the SESSION (since 2026-10-26 the arguments decide
+  // nothing), and the real _scheduleDenyReason_ runs, so these cases still pass through the
+  // genuine ownership rule. tests/authz.test.js covers who may change what.
+  const live = (SRC.match(/\nconst SCHED_LIVE_STATUSES = [^\n]*\n/) || [''])[0].replace('const ', 'var ');
+  const sources = [live, codeFn('_normName_'), codeFn('_schedKey_'), codeFn('_slotIsPast_'), codeFn('_activeRequest_'),
+                   codeFn('_scheduleOwnSlot_'), codeFn('_scheduleDenyReason_'),
                    opts.wrapper || codeFn('saveScheduleBatch'), opts.locked || codeFn('_saveScheduleBatchLocked_')];
   const ctx = sandbox(sources, {
     Utilities: UTIL,
+    _authUser: opts.caller || { role: 'sales', id: 'S1', name: '丁村', permissions: 'view_admissions' },
+    _isAdminLevel_: function () { return false; },
+    _hasPerm_: function (r, p, needed) { return String(ctx._authUser.permissions || '').split(',').indexOf(needed) !== -1; },
     _requireSession_: function () {},
     _readTabs_: function () { return { Schedule_DB: [HEADER].concat(rows) }; },
     _forgetTab_: function () {},
@@ -278,7 +286,7 @@ console.log("\n6. every other way into a past slot carries the same guard");
 
   // Picker options: never a date before today, whatever week is on screen.
   const pick = function (weekStart) {
-    const ctx = sandbox([htmlFn('getMonday'), htmlFn('formatDate'), htmlFn('_calNowKeyJst'), htmlFn('calRequestDateOptions')],
+    const ctx = sandbox([htmlFn('getMonday'), htmlFn('formatDate'), htmlFn('formatDateDisplay'), htmlFn('_calNowKeyJst'), htmlFn('calRequestDateOptions')],
       { calWeekStart: weekStart });
     return ctx.calRequestDateOptions();
   };
@@ -298,6 +306,41 @@ console.log("\n7. the diagnostic is editor-only");
   check("it is NOT in the apiCall registry", registry.indexOf('diagnoseScheduleDuplicates') === -1, "");
   check("_saveScheduleBatchLocked_ is NOT in the registry (only the locked wrapper is)",
     registry.indexOf('_saveScheduleBatchLocked_') === -1, "");
+}
+
+console.log("\n8. the 18 interview slots come from ONE generator (calPeriods)");
+{
+  // ⚠️ The server matches a slot by its exact TEXT. The list was built in three places —
+  // calRenderGrid and the 日時変更 / 交代 time dropdowns — so a copy that drifted would offer a
+  // slot the calendar never draws, and the request would find no row. Consolidated 2026-09-28.
+  const run = function (js) {
+    const src = (function () {
+      const i = js.indexOf('function calPeriods()');
+      return i < 0 ? '' : js.slice(i, js.indexOf('\n      }\n', i) + 8);
+    })();
+    const ctx = vm.createContext({});
+    vm.runInContext(src, ctx);
+    return typeof ctx.calPeriods === 'function' ? ctx.calPeriods() : null;
+  };
+  const got = run(JS);
+  const want = [];
+  for (let h = 9; h <= 17; h++) {
+    const a = (h < 10 ? '0' : '') + h, b = (h + 1 < 10 ? '0' : '') + (h + 1);
+    want.push(a + ':00 ~ ' + a + ':30', a + ':30 ~ ' + b + ':00');
+  }
+  check("calPeriods returns exactly the 18 slots, byte for byte",
+    Array.isArray(got) && got.length === 18 && JSON.stringify(got) === JSON.stringify(want)
+      && got[0] === '09:00 ~ 09:30' && got[17] === '17:30 ~ 18:00', JSON.stringify(got));
+  check("⚠️ no second slot generator exists — the grid and both dropdowns call calPeriods",
+    (strip(JS).match(/h <= 17/g) || []).length === 1
+      && /let periods = calPeriods\(\);/.test(htmlFn('calRenderGrid'))
+      && /calPeriods\(\)\.forEach/.test(htmlFn('populateBookerChangeDropdowns'))
+      && /calPeriods\(\)\.forEach/.test(htmlFn('populateReassignTimeDropdowns')), "");
+  // Mutation: the old shape — a private copy back inside one dropdown.
+  const oldCopy = strip(JS).replace('calPeriods().forEach(p => {',
+    'for (let h = 9; h <= 17; h++) { [].forEach(p => {');
+  check("  mutation: a copy re-added inside a dropdown is caught",
+    (oldCopy.match(/h <= 17/g) || []).length !== 1, "");
 }
 
 console.log("\n" + pass + " passed, " + fail + " failed");

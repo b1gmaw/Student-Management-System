@@ -38,7 +38,14 @@ function check(n, c, d) {
 // ---- transcribed from Index.html -------------------------------------------
 const GROUPS = ['cohort', 'visa'];
 const SEP = '\u0000';
-function normName(s) { return String(s == null ? '' : s).replace(/[\s　]/g, '').trim(); }
+// ⚠️ The real normName also folds full-width ASCII and LOWER-cases. An earlier copy here left
+// both out, which is how _stuGenderLabel's M / Male → その他 slipped past this suite.
+function normName(v) {
+  let s = String(v == null ? "" : v);
+  s = s.replace(/[\uFF01-\uFF5E]/g, function(ch){ return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0); });
+  s = s.replace(/[\s\u3000\u00A0]/g, "");
+  return s.toLowerCase().trim();
+}
 function _simNormCourseJs(s) {
   return String(s == null ? '' : s).replace(/[\s　]/g, '').replace(/[カヵヶ]/g, 'か');
 }
@@ -86,7 +93,7 @@ function _stuIntakeLabel(sid) {
   return y + '-' + (mo < 10 ? '0' + mo : mo);
 }
 function _stuGenderLabel(raw) {
-  const s = normName(String(raw == null ? '' : raw));
+  const s = normName(String(raw == null ? '' : raw)).toUpperCase();
   if (s === '男' || s === '男性' || s === 'M' || s === 'MALE') return '男';
   if (s === '女' || s === '女性' || s === 'F' || s === 'FEMALE') return '女';
   if (s === '') return '未記入';

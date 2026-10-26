@@ -58,8 +58,15 @@ function literalLookups(text) {
 
 console.log("\n1. no real identifier in anything that gets published");
 {
+  // docs/claude/ holds the area rules moved out of CLAUDE.md (2026-10-26). Derived, not
+  // listed, so a file added there later is scanned too.
+  const AREA_DIR = path.join(ROOT, 'docs', 'claude');
+  const AREA_DOCS = fs.existsSync(AREA_DIR)
+    ? fs.readdirSync(AREA_DIR).filter(function (f) { return /\.md$/.test(f); })
+        .map(function (f) { return 'docs/claude/' + f; })
+    : [];
   const RAW = ['Code.js', 'Shinsei_Code.js', 'CLAUDE.md', 'TECHNICAL_REFERENCE.md', 'README.md',
-               '.claude/skills/run-local/driver.mjs'];
+               '.claude/skills/run-local/driver.mjs'].concat(AREA_DOCS);
   const HTMLS = ['Index.html', 'Template.html', 'Shinsei_Template.html'];
   const present = function (f) { return fs.existsSync(path.join(ROOT, f)); };
   RAW.filter(present).forEach(function (f) {
